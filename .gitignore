@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local application database (personal financial data — never commit)
+budgeting.db

@@ -111,8 +111,10 @@ subtotal_row(row, 'Total Income', income_start, income_end); row += 2
 # --- HOUSING ---
 section_row(row, 'HOUSING'); row += 1
 housing_start = row
-item_row(row, 'Housing', 'Rent / Mortgage', 0, note='Fill in'); row += 1
-item_row(row, 'Housing', 'Other housing costs', 0, note='e.g. service charge, maintenance'); row += 1
+item_row(row, 'Housing', 'Rent / Mortgage', 2800, day=17,
+         note='Joint account — TLP RE Client Acc (letting agent), confirmed 12/12 months'); row += 1
+item_row(row, 'Housing', 'Other housing costs', 0,
+         note='Council Tax is paid as an annual lump sum — see Upcoming Expenses (~£1,020, due ~Apr)'); row += 1
 housing_end = row - 1
 housing_total_row = row
 subtotal_row(row, 'Total Housing', housing_start, housing_end); row += 2
@@ -120,10 +122,14 @@ subtotal_row(row, 'Total Housing', housing_start, housing_end); row += 2
 # --- UTILITIES & INSURANCE ---
 section_row(row, 'UTILITIES & INSURANCE'); row += 1
 util_start = row
-item_row(row, 'Utilities', 'Electricity', 64); row += 1
-item_row(row, 'Utilities', 'WiFi', 22); row += 1
-item_row(row, 'Insurance', 'Home insurance', 23); row += 1
-item_row(row, 'Insurance', 'Vet insurance', 30); row += 1
+item_row(row, 'Utilities', 'Electricity', 68.76, day=1,
+         note='E.ON Next DD, Joint account — actual avg £68.76 (range £62-76), was budgeted £64'); row += 1
+item_row(row, 'Utilities', 'WiFi', 20.56, day=5,
+         note='Community Fibre DD, Joint account — confirmed, very stable'); row += 1
+item_row(row, 'Insurance', 'Home insurance', 23,
+         note='Not found in reviewed statements — verify still active / correct amount'); row += 1
+item_row(row, 'Insurance', 'Vet insurance', 23.02, day=9,
+         note='Urban Jungle DD, Joint account — renewed from £15.02 to £23.02/mo in Apr 2026'); row += 1
 util_end = row - 1
 util_total_row = row
 subtotal_row(row, 'Total Utilities & Insurance', util_start, util_end); row += 2
@@ -131,8 +137,14 @@ subtotal_row(row, 'Total Utilities & Insurance', util_start, util_end); row += 2
 # --- TRANSPORT ---
 section_row(row, 'TRANSPORT'); row += 1
 transport_start = row
-item_row(row, 'Transport', 'Car expenses', 142); row += 1
-item_row(row, 'Transport', 'Car expenses', 100); row += 1
+item_row(row, 'Transport', 'Car tax — B355RHC (DVLA)', 31.50, day=1,
+         note='Personal HSBC DD — was bundled into "Car expenses 142"'); row += 1
+item_row(row, 'Transport', 'Car tax — C800BWR (DVLA)', 32.81, day=1,
+         note='Personal HSBC DD — second car, was bundled into "Car expenses 142"'); row += 1
+item_row(row, 'Transport', 'Car insurance (Elephant)', 77.53, day=28,
+         note='Personal HSBC DD — was bundled into "Car expenses 142"'); row += 1
+item_row(row, 'Transport', 'Fuel', 102.54,
+         note='Variable card spend, Joint account — avg per active month, not a fixed DD (was "Car expenses 100")'); row += 1
 transport_end = row - 1
 transport_total_row = row
 subtotal_row(row, 'Total Transport', transport_start, transport_end); row += 2
@@ -140,13 +152,24 @@ subtotal_row(row, 'Total Transport', transport_start, transport_end); row += 2
 # --- SUBSCRIPTIONS ---
 section_row(row, 'SUBSCRIPTIONS'); row += 1
 sub_start = row
-item_row(row, 'Subscriptions', 'Spotify', 18); row += 1
-item_row(row, 'Subscriptions', 'Netflix', 6); row += 1
-item_row(row, 'Subscriptions', 'Amazon', 8.99); row += 1
-item_row(row, 'Subscriptions', 'Apple', 3); row += 1
-item_row(row, 'Subscriptions', 'Google', 2); row += 1
-item_row(row, 'Subscriptions', 'TV licence', 15); row += 1
-item_row(row, 'Subscriptions', 'AWS', 5); row += 1
+item_row(row, 'Subscriptions', 'Spotify', 17.66, day=1,
+         note='Personal Monzo — confirmed, day varies 1-11'); row += 1
+item_row(row, 'Subscriptions', 'Netflix', 5.99, day=5,
+         note='Joint account — confirmed exact'); row += 1
+item_row(row, 'Subscriptions', 'Amazon Prime', 8.99, day=16,
+         note='Amex — confirmed exact'); row += 1
+item_row(row, 'Subscriptions', 'Apple', 3,
+         note='Not confirmed monthly — only a one-off £53.99 Amex charge seen; verify what this is'); row += 1
+item_row(row, 'Subscriptions', 'Google', 2,
+         note='Not found in reviewed statements — verify still active'); row += 1
+item_row(row, 'Subscriptions', 'TV licence', 36.00, day=1,
+         note='TV Licensing DD, Joint account — actual is £36, was budgeted £15; only seen Jun & Jul (may be a 10-month DD scheme)'); row += 1
+item_row(row, 'Subscriptions', 'AWS', 23.53,
+         note='Usage-based, Personal Monzo — avg £23.53 (range ~£14-33), varies month to month, was budgeted £5'); row += 1
+item_row(row, 'Subscriptions', 'Claude.ai', 18.00, day=28,
+         note='New — Amex, confirmed 3/3 months, not in original list'); row += 1
+item_row(row, 'Subscriptions', 'Voxi (Vodafone) mobile', 10.00, day=8,
+         note='New — Personal HSBC, variable £4.80-16, present every month, not in original list'); row += 1
 sub_end = row - 1
 sub_total_row = row
 subtotal_row(row, 'Total Subscriptions', sub_start, sub_end); row += 2
@@ -154,8 +177,12 @@ subtotal_row(row, 'Total Subscriptions', sub_start, sub_end); row += 2
 # --- PERSONAL & OTHER ---
 section_row(row, 'PERSONAL & OTHER'); row += 1
 personal_start = row
-item_row(row, 'Personal', 'Nathan', 150); row += 1
-item_row(row, 'Personal', 'Swimming', 45); row += 1
+item_row(row, 'Personal', 'Nathan', 150,
+         note='Not found in reviewed statements — verify (may be paid via cash/another account)'); row += 1
+item_row(row, 'Personal', 'Swimming', 45,
+         note='Not found in reviewed statements — verify (may be paid via cash/another account)'); row += 1
+item_row(row, 'Personal', 'The Riders Hub', 15.00,
+         note='Low confidence — appears sporadically on personal HSBC & Monzo, possibly a lesson/hobby subscription; verify'); row += 1
 personal_end = row - 1
 personal_total_row = row
 subtotal_row(row, 'Total Personal & Other', personal_start, personal_end); row += 2
@@ -302,6 +329,17 @@ ws_ue.row_dimensions[UE_HEADER_ROW].height = 20
 UE_FIRST_ROW = UE_HEADER_ROW + 1
 UE_ROWS = 60
 UE_LAST_ROW = UE_FIRST_ROW + UE_ROWS - 1
+
+# Known non-monthly bills found in the statement history — paid too infrequently
+# to belong in the monthly Budget sheet, but real and worth forecasting for.
+import datetime as _dt
+known_upcoming = [
+    (_dt.date(2026, 10, 14), 'Thames Water (6-monthly)', 188.00,
+     'Recurs ~every 6 months; last seen ~Apr 2026 (~£186-190), Joint account'),
+    (_dt.date(2027, 4, 27), 'Council Tax (Wandsworth) — annual', 1020.35,
+     'Paid as an annual lump sum from the Joint account; may increase with rate changes'),
+]
+
 for i in range(UE_ROWS):
     r = UE_FIRST_ROW + i
     dcell = ws_ue.cell(row=r, column=1)
@@ -317,6 +355,12 @@ for i in range(UE_ROWS):
     ncell = ws_ue.cell(row=r, column=4)
     ncell.fill = INPUT_FILL
     ncell.border = BORDER
+    if i < len(known_upcoming):
+        d, desc, amt, note = known_upcoming[i]
+        dcell.value = d
+        ws_ue.cell(row=r, column=2).value = desc
+        acell.value = amt
+        ncell.value = note
 
 ws_ue.freeze_panes = 'A5'
 
