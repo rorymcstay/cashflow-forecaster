@@ -1,7 +1,7 @@
 import datetime as dt
 import enum
 
-from sqlalchemy import Date, Enum, Float, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Date, DateTime, Enum, Float, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -111,3 +111,79 @@ class UpcomingExpense(Base):
 
     category: Mapped["Category"] = relationship()
     account: Mapped["Account"] = relationship(back_populates="upcoming_expenses")
+
+
+class Statement(Base):
+    """A single billing-period import of transactions for one account."""
+
+    __tablename__ = "statements"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    period_start: Mapped[dt.date] = mapped_column(Date)
+    period_end: Mapped[dt.date] = mapped_column(Date)
+    imported_at: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: dt.datetime.now(dt.UTC))
+    source_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    account: Mapped["Account"] = relationship()
+    transactions: Mapped[list["Transaction"]] = relationship(
+        back_populates="statement", cascade="all, delete-orphan")
+
+
+class Transaction(Base):
+    """A single classified transaction imported from a statement."""
+
+    __tablename__ = "transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    statement_id: Mapped[int] = mapped_column(ForeignKey("statements.id"))
+    date: Mapped[dt.date] = mapped_column(Date)
+    description: Mapped[str] = mapped_column(String(255))
+    amount: Mapped[float] = mapped_column(Float)
+    category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
+    matched_budget_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("budget_items.id"), nullable=True)
+
+    statement: Mapped["Statement"] = relationship(back_populates="transactions")
+    category: Mapped["Category | None"] = relationship()
+    matched_budget_item: Mapped["BudgetItem | None"] = relationship()
+
+
+class SuggestionType(enum.Enum):
+    NEW_ITEM = "New Item"
+    AMOUNT_CHANGE = "Amount Change"
+
+
+class SuggestionStatus(enum.Enum):
+    PENDING = "Pending"
+    ACCEPTED = "Accepted"
+    REJECTED = "Rejected"
+
+
+class BudgetSuggestion(Base):
+    """A proposed change to the budget, generated from imported transaction
+    history, awaiting the user's accept/reject decision."""
+
+    __tablename__ = "budget_suggestions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    suggestion_type: Mapped[SuggestionType] = mapped_column(Enum(SuggestionType))
+    status: Mapped[SuggestionStatus] = mapped_column(Enum(SuggestionStatus), default=SuggestionStatus.PENDING)
+
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"))
+    description: Mapped[str] = mapped_column(String(120))
+    proposed_amount: Mapped[float] = mapped_column(Float)
+    proposed_frequency: Mapped[Frequency] = mapped_column(Enum(Frequency))
+
+    budget_item_id: Mapped[int | None] = mapped_column(ForeignKey("budget_items.id"), nullable=True)
+    current_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rationale: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_statement_id: Mapped[int | None] = mapped_column(ForeignKey("statements.id"), nullable=True)
+
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: dt.datetime.now(dt.UTC))
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+    account: Mapped["Account"] = relationship()
+    category: Mapped["Category"] = relationship()
+    budget_item: Mapped["BudgetItem | None"] = relationship()

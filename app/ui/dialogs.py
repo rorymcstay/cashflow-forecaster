@@ -3,11 +3,11 @@ import datetime as dt
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QFormLayout, QLineEdit, QMessageBox,
+    QFormLayout, QLabel, QLineEdit, QMessageBox,
 )
 from sqlalchemy.orm import Session
 
-from app.models import Account, BudgetItem, Category, FlowType, Frequency, UpcomingExpense
+from app.models import Account, BudgetItem, Category, FlowType, Frequency, Transaction, UpcomingExpense
 from app.seed import get_or_create_category
 
 
@@ -206,6 +206,42 @@ class BudgetItemDialog(QDialog):
             self.obj.category = category
             self.obj.account_id = account_id
 
+        self.session.commit()
+        self.accept()
+
+
+class TransactionCategoryDialog(QDialog):
+    def __init__(self, session: Session, transaction: Transaction, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.transaction = transaction
+        self.setWindowTitle("Reclassify Transaction")
+
+        self.category_combo = QComboBox()
+        self.category_combo.setEditable(True)
+        categories = sorted(session.query(Category).all(), key=lambda c: c.name)
+        for c in categories:
+            self.category_combo.addItem(c.name)
+        if transaction.category:
+            self.category_combo.setCurrentText(transaction.category.name)
+
+        form = QFormLayout()
+        form.addRow("Description", QLabel(transaction.description))
+        form.addRow("Amount", QLabel(f"£{transaction.amount:,.2f}"))
+        form.addRow("Category", self.category_combo)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.on_accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.setLayout(form)
+
+    def on_accept(self):
+        category_name = self.category_combo.currentText().strip()
+        if not category_name:
+            QMessageBox.warning(self, "Missing category", "Please enter or choose a category.")
+            return
+        self.transaction.category = get_or_create_category(self.session, category_name)
         self.session.commit()
         self.accept()
 

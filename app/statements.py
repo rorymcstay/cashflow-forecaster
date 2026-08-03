@@ -124,7 +124,7 @@ def extract_csv_transactions(file_path: str) -> list[dict]:
     return transactions
 
 
-def _normalize_description(description: str) -> str:
+def normalize_description(description: str) -> str:
     text = description.upper()
     text = re.sub(r"\d{4,}", "", text)  # strip long reference/card numbers
     text = re.sub(r"[^A-Z0-9 ]", " ", text)
@@ -156,7 +156,7 @@ def find_recurring_transactions(transactions: list[dict], min_occurrences: int =
     """
     groups: dict[str, list[dict]] = defaultdict(list)
     for t in transactions:
-        key = _normalize_description(str(t.get("description", "")))
+        key = normalize_description(str(t.get("description", "")))
         if key:
             groups[key].append(t)
 
