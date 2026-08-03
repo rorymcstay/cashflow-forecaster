@@ -1,4 +1,3 @@
-import calendar
 import datetime as dt
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QScatterSeries, QValueAxis
@@ -32,13 +31,24 @@ class CashflowForecastScreen(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<h2>Cash Flow Forecast</h2>"))
 
+        today = QDate.currentDate()
+        month_start = QDate(today.year(), today.month(), 1)
+        month_end = QDate(today.year(), today.month(), today.daysInMonth())
+
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("Month:"))
-        self.month_edit = QDateEdit(QDate.currentDate())
-        self.month_edit.setDisplayFormat("MMMM yyyy")
-        self.month_edit.setCalendarPopup(True)
-        self.month_edit.dateChanged.connect(self.refresh)
-        controls.addWidget(self.month_edit)
+        controls.addWidget(QLabel("Start:"))
+        self.start_edit = QDateEdit(month_start)
+        self.start_edit.setDisplayFormat("d MMM yyyy")
+        self.start_edit.setCalendarPopup(True)
+        self.start_edit.dateChanged.connect(self.refresh)
+        controls.addWidget(self.start_edit)
+
+        controls.addWidget(QLabel("End:"))
+        self.end_edit = QDateEdit(month_end)
+        self.end_edit.setDisplayFormat("d MMM yyyy")
+        self.end_edit.setCalendarPopup(True)
+        self.end_edit.dateChanged.connect(self.refresh)
+        controls.addWidget(self.end_edit)
 
         controls.addWidget(QLabel("Account:"))
         self.account_combo = QComboBox()
@@ -198,23 +208,29 @@ class CashflowForecastScreen(QWidget):
         return item
 
     def refresh(self):
-        qd = self.month_edit.date()
-        month_start = dt.date(qd.year(), qd.month(), 1)
-        month_end = dt.date(qd.year(), qd.month(), calendar.monthrange(qd.year(), qd.month())[1])
+        sd, ed = self.start_edit.date(), self.end_edit.date()
+        range_start = dt.date(sd.year(), sd.month(), sd.day())
+        range_end = dt.date(ed.year(), ed.month(), ed.day())
+
+        if range_end < range_start:
+            self.table.setRowCount(0)
+            self.warnings_label.setText("End date is before start date.")
+            self._update_chart([], [], None)
+            return
 
         account_id = self.account_combo.currentData()
         single_account = account_id is not None
         account = None
         if single_account:
             account = self.session.get(Account, account_id)
-            df = account_daily_forecast(self.session, account, month_start, month_end)
+            df = account_daily_forecast(self.session, account, range_start, range_end)
         else:
-            df = combined_daily_forecast(self.session, month_start, month_end)
+            df = combined_daily_forecast(self.session, range_start, range_end)
 
         self.table.setRowCount(0)
         if df.height == 0:
             self.warnings_label.setText(
-                "No data for this month — the account's Balance As Of date is after the selected month.")
+                "No data for this range — the account's Balance As Of date is after the selected range.")
             self._update_chart([], [], None)
             return
 
@@ -223,7 +239,7 @@ class CashflowForecastScreen(QWidget):
         for row in df.iter_rows(named=True):
             r = self.table.rowCount()
             self.table.insertRow(r)
-            self.table.setItem(r, 0, QTableWidgetItem(row["date"].strftime("%a %d %b")))
+            self.table.setItem(r, 0, QTableWidgetItem(row["date"].strftime("%a %d %b %Y")))
             self.table.setItem(r, 1, self._money_item(row["in"]))
             self.table.setItem(r, 2, self._money_item(row["out"]))
             self.table.setItem(r, 3, self._money_item(row["net"]))
@@ -241,16 +257,16 @@ class CashflowForecastScreen(QWidget):
         threshold = account.low_balance_threshold if single_account and account else None
         self._update_chart(dates, balances, threshold)
 
-        warnings = low_balance_warnings(self.session, month_start, month_end)
+        warnings = low_balance_warnings(self.session, range_start, range_end)
         if warnings:
             shown = warnings[:8]
             lines = [
                 f"⚠ {w['account']} drops below £{w['threshold']:,.2f} on "
-                f"{w['date'].strftime('%d %b')} (forecast £{w['balance']:,.2f})"
+                f"{w['date'].strftime('%d %b %Y')} (forecast £{w['balance']:,.2f})"
                 for w in shown
             ]
             if len(warnings) > len(shown):
-                lines.append(f"…and {len(warnings) - len(shown)} more this month")
+                lines.append(f"…and {len(warnings) - len(shown)} more in this range")
             self.warnings_label.setText("\n".join(lines))
         else:
             self.warnings_label.setText("")

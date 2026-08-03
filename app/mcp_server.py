@@ -466,8 +466,13 @@ def get_budget_summary(as_of: str | None = None) -> dict:
 
 
 @server.tool()
-def get_cashflow_forecast(month: str, account: str | None = None) -> dict:
-    """Daily cashflow forecast for a month ('YYYY-MM' or any ISO date within it).
+def get_cashflow_forecast(start_date: str, end_date: str | None = None, account: str | None = None) -> dict:
+    """Daily cashflow forecast over a date range (any length — a week, several
+    months, a year).
+
+    start_date and end_date are ISO dates ('YYYY-MM-DD'). As a shortcut,
+    start_date may instead be a month ('YYYY-MM') with end_date omitted, in
+    which case the forecast covers that whole calendar month.
 
     If account is omitted, returns the combined forecast across every
     account (valid from the latest balance_as_of date among them, with a
@@ -477,23 +482,28 @@ def get_cashflow_forecast(month: str, account: str | None = None) -> dict:
     """
     session = get_session()
     try:
-        year, month_num = (int(p) for p in month.split("-")[:2])
-        month_start = dt.date(year, month_num, 1)
-        month_end = dt.date(year, month_num, calendar.monthrange(year, month_num)[1])
+        if end_date is None and len(start_date) == 7:
+            year, month_num = (int(p) for p in start_date.split("-"))
+            range_start = dt.date(year, month_num, 1)
+            range_end = dt.date(year, month_num, calendar.monthrange(year, month_num)[1])
+        else:
+            range_start = _parse_date(start_date)
+            range_end = _parse_date(end_date) if end_date else range_start
 
         if account is None:
-            df = combined_daily_forecast(session, month_start, month_end)
+            df = combined_daily_forecast(session, range_start, range_end)
             acc = None
         else:
             acc = _resolve_account(session, account)
-            df = account_daily_forecast(session, acc, month_start, month_end)
+            df = account_daily_forecast(session, acc, range_start, range_end)
 
         if df.height == 0:
             return {
-                "month": f"{year:04d}-{month_num:02d}",
+                "start_date": range_start.isoformat(),
+                "end_date": range_end.isoformat(),
                 "account": account,
                 "days": [],
-                "note": "No data — the account's balance-as-of date is after this month.",
+                "note": "No data — the account's balance-as-of date is after this range.",
             }
 
         days = df.to_dicts()
@@ -504,12 +514,13 @@ def get_cashflow_forecast(month: str, account: str | None = None) -> dict:
         if acc is not None:
             warnings = [
                 {**w, "date": w["date"].isoformat()}
-                for w in low_balance_warnings(session, month_start, month_end)
+                for w in low_balance_warnings(session, range_start, range_end)
                 if w["account"] == acc.name
             ]
 
         return {
-            "month": f"{year:04d}-{month_num:02d}",
+            "start_date": range_start.isoformat(),
+            "end_date": range_end.isoformat(),
             "account": account or "All Accounts (combined)",
             "days": days,
             "closing_balance": days[-1]["balance"],
