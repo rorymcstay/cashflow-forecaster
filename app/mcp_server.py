@@ -7,8 +7,15 @@ from app.db import get_session, init_db
 from app.forecast import (
     account_daily_forecast, combined_daily_forecast, low_balance_warnings, monthly_budget_summary,
 )
-from app.models import Account, BudgetItem, Category, FlowType, Frequency, UpcomingExpense
+from app.models import (
+    Account, BudgetItem, BudgetSuggestion, Category, FlowType, Frequency, Statement, SuggestionStatus,
+    SuggestionType, Transaction, UpcomingExpense,
+)
 from app.seed import get_or_create_category, seed_defaults
+from app.statement_import import (
+    UNCATEGORIZED, accept_suggestion as _accept_suggestion, budget_vs_actual_report as _budget_vs_actual_report,
+    import_statement as _import_statement_core, reject_suggestion as _reject_suggestion,
+)
 from app.statements import (
     extract_csv_transactions, find_recurring_transactions as _find_recurring, read_pdf_text as _read_pdf_text,
 )
@@ -17,10 +24,12 @@ server = MCPServer(
     "household-budgeting",
     instructions=(
         "Tools for the household budgeting app: analysing bank/card statements, "
-        "and reading/writing the same SQLite data the desktop GUI uses (accounts, "
-        "recurring budget items, one-off upcoming expenses, and cashflow forecasts). "
-        "Money amounts on committed budget items and upcoming expenses are always "
-        "positive; direction (income vs expense) is a separate field."
+        "importing them to save classified transactions, comparing actuals against the "
+        "budget, and reading/writing the same SQLite data the desktop GUI uses (accounts, "
+        "recurring budget items, one-off upcoming expenses, budget suggestions, and "
+        "cashflow forecasts). Money amounts on committed budget items and upcoming "
+        "expenses are always positive; direction (income vs expense) is a separate field. "
+        "Imported transactions and statements keep their own signed `amount` (+ in / - out)."
     ),
 )
 
@@ -72,6 +81,57 @@ def _upcoming_to_dict(u: UpcomingExpense) -> dict:
         "category": u.category.name,
         "account": u.account.name,
     }
+
+
+def _statement_to_dict(s: Statement) -> dict:
+    return {
+        "id": s.id,
+        "account": s.account.name,
+        "period_start": s.period_start.isoformat(),
+        "period_end": s.period_end.isoformat(),
+        "imported_at": s.imported_at.isoformat(),
+        "source_note": s.source_note,
+        "transaction_count": len(s.transactions),
+        "net": round(sum(t.amount for t in s.transactions), 2),
+    }
+
+
+def _transaction_to_dict(t: Transaction) -> dict:
+    return {
+        "id": t.id,
+        "statement_id": t.statement_id,
+        "date": t.date.isoformat(),
+        "description": t.description,
+        "amount": t.amount,
+        "category": t.category.name if t.category else None,
+        "matched_budget_item_id": t.matched_budget_item_id,
+        "matched_budget_item": t.matched_budget_item.description if t.matched_budget_item else None,
+    }
+
+
+def _suggestion_to_dict(sg: BudgetSuggestion) -> dict:
+    return {
+        "id": sg.id,
+        "type": sg.suggestion_type.value,
+        "status": sg.status.value,
+        "account": sg.account.name,
+        "category": sg.category.name,
+        "description": sg.description,
+        "proposed_amount": sg.proposed_amount,
+        "proposed_frequency": sg.proposed_frequency.value,
+        "budget_item_id": sg.budget_item_id,
+        "current_amount": sg.current_amount,
+        "rationale": sg.rationale,
+        "created_at": sg.created_at.isoformat(),
+        "decided_at": sg.decided_at.isoformat() if sg.decided_at else None,
+    }
+
+
+def _resolve_suggestion_status(value: str) -> SuggestionStatus:
+    for s in SuggestionStatus:
+        if s.value.lower() == value.lower() or s.name.lower() == value.lower():
+            return s
+    raise ValueError(f"Unknown status '{value}'. Valid values: {[s.value for s in SuggestionStatus]}, or 'All'.")
 
 
 def _resolve_account(session, name: str) -> Account:
@@ -141,6 +201,206 @@ def find_recurring_transactions(transactions: list[dict], min_occurrences: int =
     in the first place.
     """
     return _find_recurring(transactions, min_occurrences, amount_tolerance_pct)
+
+
+# ---------------------------------------------------------------------------
+# statement import / budget suggestions
+# ---------------------------------------------------------------------------
+
+@server.tool()
+def import_statement(account: str, transactions: list[dict], period_start: str | None = None,
+                      period_end: str | None = None, source_note: str | None = None) -> dict:
+    """Save a billing period's transactions, classify them, update the account
+    balance, and refresh this account's budget suggestions.
+
+    `transactions` is a list of {date, description, amount} — the direct
+    output of extract_csv_statement, or a list you assemble by hand after
+    reading a PDF with read_pdf_statement (same handoff used by
+    find_recurring_transactions). Amount is signed: positive = money in,
+    negative = money out.
+
+    period_start/period_end (ISO dates) default to the min/max transaction
+    date if omitted. Statements must be imported in chronological order per
+    account: the balance is updated by summing the imported transactions
+    onto current_balance and advancing balance_as_of to period_end, so an
+    out-of-order (backdated) import is rejected to avoid double-counting.
+
+    Returns the saved statement, its budget-vs-actual report for the period,
+    and this account's currently pending budget suggestions (new ones from
+    this import, plus any still outstanding from before).
+    """
+    session = get_session()
+    try:
+        acc = _resolve_account(session, account)
+        if not transactions:
+            raise ValueError("No transactions to import.")
+        dates = [t["date"] if isinstance(t["date"], dt.date) else dt.date.fromisoformat(t["date"])
+                 for t in transactions]
+        start = _parse_date(period_start) or min(dates)
+        end = _parse_date(period_end) or max(dates)
+
+        statement = _import_statement_core(session, acc, transactions, start, end, source_note)
+        report = _budget_vs_actual_report(session, statement)
+        suggestions = (
+            session.query(BudgetSuggestion)
+            .filter_by(account_id=acc.id, status=SuggestionStatus.PENDING)
+            .order_by(BudgetSuggestion.created_at.desc())
+            .all()
+        )
+        return {
+            "statement": _statement_to_dict(statement),
+            "budget_vs_actual": report,
+            "pending_suggestions": [_suggestion_to_dict(s) for s in suggestions],
+        }
+    finally:
+        session.close()
+
+
+@server.tool()
+def list_statements(account: str | None = None) -> list[dict]:
+    """List imported statements, optionally filtered to one account."""
+    session = get_session()
+    try:
+        query = session.query(Statement)
+        if account:
+            acc = _resolve_account(session, account)
+            query = query.filter(Statement.account_id == acc.id)
+        return [_statement_to_dict(s) for s in query.order_by(Statement.period_start).all()]
+    finally:
+        session.close()
+
+
+@server.tool()
+def get_statement_report(statement_id: int) -> dict:
+    """Budget-vs-actual report for an already-imported statement."""
+    session = get_session()
+    try:
+        statement = session.get(Statement, statement_id)
+        if statement is None:
+            raise ValueError(f"No statement with id {statement_id}")
+        return _budget_vs_actual_report(session, statement)
+    finally:
+        session.close()
+
+
+@server.tool()
+def list_transactions(statement_id: int | None = None, account: str | None = None,
+                       start_date: str | None = None, end_date: str | None = None,
+                       category: str | None = None, uncategorized_only: bool = False) -> list[dict]:
+    """List saved transactions, filtered by any combination of statement,
+    account, date range, or category. Set uncategorized_only=True to find
+    transactions the keyword classifier couldn't place, for manual review
+    (see update_transaction_category)."""
+    session = get_session()
+    try:
+        query = session.query(Transaction)
+        if statement_id is not None:
+            query = query.filter(Transaction.statement_id == statement_id)
+        if account:
+            acc = _resolve_account(session, account)
+            query = query.join(Statement).filter(Statement.account_id == acc.id)
+        if start_date:
+            query = query.filter(Transaction.date >= _parse_date(start_date))
+        if end_date:
+            query = query.filter(Transaction.date <= _parse_date(end_date))
+        if category:
+            query = query.filter(Transaction.category.has(Category.name == category))
+        if uncategorized_only:
+            query = query.filter(
+                (Transaction.category_id.is_(None)) | Transaction.category.has(Category.name == UNCATEGORIZED)
+            )
+        return [_transaction_to_dict(t) for t in query.order_by(Transaction.date).all()]
+    finally:
+        session.close()
+
+
+@server.tool()
+def update_transaction_category(transaction_id: int, category: str) -> dict:
+    """Manually reclassify a transaction (the keyword classifier is best-effort)."""
+    session = get_session()
+    try:
+        t = session.get(Transaction, transaction_id)
+        if t is None:
+            raise ValueError(f"No transaction with id {transaction_id}")
+        t.category = get_or_create_category(session, category)
+        session.commit()
+        return _transaction_to_dict(t)
+    finally:
+        session.close()
+
+
+@server.tool()
+def delete_statement(statement_id: int) -> dict:
+    """Delete a statement and its transactions, and best-effort reverse its
+    effect on the account balance (subtracts the statement's net back out of
+    current_balance). Doesn't rewind balance_as_of if a later statement has
+    since been imported for this account — use update_account to correct
+    the balance manually in that case."""
+    session = get_session()
+    try:
+        statement = session.get(Statement, statement_id)
+        if statement is None:
+            raise ValueError(f"No statement with id {statement_id}")
+        account = statement.account
+        net = sum(t.amount for t in statement.transactions)
+        account.current_balance -= net
+        period = f"{statement.period_start.isoformat()} to {statement.period_end.isoformat()}"
+        session.delete(statement)
+        session.commit()
+        return {"deleted": f"{account.name} statement ({period})", "balance_adjustment": round(-net, 2)}
+    finally:
+        session.close()
+
+
+@server.tool()
+def list_budget_suggestions(status: str = "Pending", account: str | None = None) -> list[dict]:
+    """List budget suggestions generated from statement imports.
+
+    status: 'Pending' (default), 'Accepted', 'Rejected', or 'All'.
+    """
+    session = get_session()
+    try:
+        query = session.query(BudgetSuggestion)
+        if status.lower() != "all":
+            query = query.filter(BudgetSuggestion.status == _resolve_suggestion_status(status))
+        if account:
+            acc = _resolve_account(session, account)
+            query = query.filter(BudgetSuggestion.account_id == acc.id)
+        return [_suggestion_to_dict(s) for s in query.order_by(BudgetSuggestion.created_at.desc()).all()]
+    finally:
+        session.close()
+
+
+@server.tool()
+def accept_budget_suggestion(suggestion_id: int) -> dict:
+    """Accept a pending budget suggestion: creates a new Budget Item (for a
+    'New Item' suggestion) or updates the existing item's amount (for an
+    'Amount Change' suggestion). The new/updated item's effective_from is
+    today, so it doesn't retroactively change past budget summaries."""
+    session = get_session()
+    try:
+        sg = session.get(BudgetSuggestion, suggestion_id)
+        if sg is None:
+            raise ValueError(f"No budget suggestion with id {suggestion_id}")
+        item = _accept_suggestion(session, sg)
+        return {"suggestion": _suggestion_to_dict(sg), "budget_item": _budget_item_to_dict(item)}
+    finally:
+        session.close()
+
+
+@server.tool()
+def reject_budget_suggestion(suggestion_id: int) -> dict:
+    """Reject a pending budget suggestion. Rejected suggestions aren't
+    re-proposed by future imports."""
+    session = get_session()
+    try:
+        sg = session.get(BudgetSuggestion, suggestion_id)
+        if sg is None:
+            raise ValueError(f"No budget suggestion with id {suggestion_id}")
+        _reject_suggestion(session, sg)
+        return _suggestion_to_dict(sg)
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
