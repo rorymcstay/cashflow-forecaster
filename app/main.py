@@ -3,7 +3,13 @@ import sys
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QMainWindow, QTabWidget, QVBoxLayout, QWidget,
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
 
 from app.db import get_session, init_db
@@ -25,8 +31,11 @@ def _build_header_bar() -> QWidget:
     layout.setSpacing(10)
 
     logo = QLabel()
-    logo.setPixmap(QPixmap(theme.ICON_PATH).scaled(
-        28, 28, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+    logo.setPixmap(
+        QPixmap(theme.ICON_PATH).scaled(
+            28, 28, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        )
+    )
     layout.addWidget(logo)
 
     text_col = QVBoxLayout()

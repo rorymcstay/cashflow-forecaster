@@ -19,5 +19,12 @@ def query_upcoming_expenses(session: Session) -> list[UpcomingExpense]:
 
 class UpcomingExpensesScreen(CrudScreen):
     def __init__(self, session: Session, on_change=None, parent=None):
-        super().__init__(session, "Upcoming Expenses", COLUMNS, query_upcoming_expenses,
-                          UpcomingExpenseDialog, on_change=on_change, parent=parent)
+        super().__init__(
+            session,
+            "Upcoming Expenses",
+            COLUMNS,
+            query_upcoming_expenses,
+            UpcomingExpenseDialog,
+            on_change=on_change,
+            parent=parent,
+        )

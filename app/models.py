@@ -127,7 +127,8 @@ class Statement(Base):
 
     account: Mapped["Account"] = relationship()
     transactions: Mapped[list["Transaction"]] = relationship(
-        back_populates="statement", cascade="all, delete-orphan")
+        back_populates="statement", cascade="all, delete-orphan"
+    )
 
 
 class Transaction(Base):
@@ -141,8 +142,7 @@ class Transaction(Base):
     description: Mapped[str] = mapped_column(String(255))
     amount: Mapped[float] = mapped_column(Float)
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
-    matched_budget_item_id: Mapped[int | None] = mapped_column(
-        ForeignKey("budget_items.id"), nullable=True)
+    matched_budget_item_id: Mapped[int | None] = mapped_column(ForeignKey("budget_items.id"), nullable=True)
 
     statement: Mapped["Statement"] = relationship(back_populates="transactions")
     category: Mapped["Category | None"] = relationship()

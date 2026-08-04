@@ -4,14 +4,28 @@ from pathlib import Path
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDateEdit, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView,
+    QComboBox,
+    QDateEdit,
+    QDialog,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 from sqlalchemy.orm import Session
 
 from app.models import Account, BudgetSuggestion, Statement, SuggestionStatus, Transaction
 from app.statement_import import (
-    accept_suggestion, budget_vs_actual_report, import_statement, reject_suggestion,
+    accept_suggestion,
+    budget_vs_actual_report,
+    import_statement,
+    reject_suggestion,
 )
 from app.statements import extract_csv_transactions
 from app.ui import theme
@@ -65,7 +79,8 @@ class StatementsScreen(QWidget):
         self.statements_table = QTableWidget()
         self.statements_table.setColumnCount(5)
         self.statements_table.setHorizontalHeaderLabels(
-            ["Account", "Period", "Imported", "Transactions", "Net"])
+            ["Account", "Period", "Imported", "Transactions", "Net"]
+        )
         self.statements_table.horizontalHeader().setStretchLastSection(True)
         self.statements_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.statements_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -166,7 +181,11 @@ class StatementsScreen(QWidget):
 
         try:
             statement = import_statement(
-                self.session, account, self._pending_transactions, period_start, period_end,
+                self.session,
+                account,
+                self._pending_transactions,
+                period_start,
+                period_end,
                 source_note=self.file_label.text(),
             )
         except ValueError as exc:
@@ -233,10 +252,12 @@ class StatementsScreen(QWidget):
             return
         statement = self._selected_statement
         reply = QMessageBox.question(
-            self, "Confirm delete",
+            self,
+            "Confirm delete",
             f"Delete this statement ({statement.period_start.strftime('%d %b %Y')} – "
             f"{statement.period_end.strftime('%d %b %Y')}) and its {len(statement.transactions)} "
-            "transaction(s)? This subtracts its net back out of the account balance.")
+            "transaction(s)? This subtracts its net back out of the account balance.",
+        )
         if reply != QMessageBox.StandardButton.Yes:
             return
         account = statement.account
@@ -268,7 +289,8 @@ class StatementsScreen(QWidget):
         self.transactions_table = QTableWidget()
         self.transactions_table.setColumnCount(5)
         self.transactions_table.setHorizontalHeaderLabels(
-            ["Date", "Description", "Amount", "Category", "Matched Budget Item"])
+            ["Date", "Description", "Amount", "Category", "Matched Budget Item"]
+        )
         self.transactions_table.horizontalHeader().setStretchLastSection(True)
         self.transactions_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.transactions_table.verticalHeader().setVisible(False)
@@ -278,8 +300,15 @@ class StatementsScreen(QWidget):
 
         return panel
 
-    def _add_report_row(self, category: str, budgeted: float | None, actual: float | None,
-                         variance: float | None, bold: bool = False, bg: QColor | None = None):
+    def _add_report_row(
+        self,
+        category: str,
+        budgeted: float | None,
+        actual: float | None,
+        variance: float | None,
+        bold: bool = False,
+        bg: QColor | None = None,
+    ):
         row = self.report_table.rowCount()
         self.report_table.insertRow(row)
         cat_item = QTableWidgetItem(category)
@@ -310,8 +339,14 @@ class StatementsScreen(QWidget):
         report = budget_vs_actual_report(self.session, statement)
         for row in report["by_category"]:
             self._add_report_row(row["category"], row["budgeted"], row["actual"], row["variance"])
-        self._add_report_row("Total", report["total_budgeted"], report["total_actual"],
-                              report["total_variance"], bold=True, bg=TOTAL_BG)
+        self._add_report_row(
+            "Total",
+            report["total_budgeted"],
+            report["total_actual"],
+            report["total_variance"],
+            bold=True,
+            bg=TOTAL_BG,
+        )
         self.report_table.resizeColumnToContents(0)
 
         for t in sorted(statement.transactions, key=lambda t: t.date):
@@ -348,7 +383,8 @@ class StatementsScreen(QWidget):
         self.suggestions_table = QTableWidget()
         self.suggestions_table.setColumnCount(7)
         self.suggestions_table.setHorizontalHeaderLabels(
-            ["Type", "Description", "Category", "Account", "Current", "Proposed", "Rationale"])
+            ["Type", "Description", "Category", "Account", "Current", "Proposed", "Rationale"]
+        )
         self.suggestions_table.horizontalHeader().setStretchLastSection(True)
         self.suggestions_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.suggestions_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)

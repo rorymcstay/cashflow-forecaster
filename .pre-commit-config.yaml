@@ -1,0 +1,21 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.1
+    hooks:
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty (type check - advisory, non-blocking for now)
+        entry: bash -c 'uv run ty check; exit 0'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        always_run: true

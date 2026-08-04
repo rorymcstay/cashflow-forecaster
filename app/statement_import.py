@@ -16,8 +16,15 @@ from sqlalchemy.orm import Session
 from app.classify import classify
 from app.forecast import generate_occurrences
 from app.models import (
-    Account, BudgetItem, BudgetSuggestion, FlowType, Frequency, Statement, SuggestionStatus,
-    SuggestionType, Transaction,
+    Account,
+    BudgetItem,
+    BudgetSuggestion,
+    FlowType,
+    Frequency,
+    Statement,
+    SuggestionStatus,
+    SuggestionType,
+    Transaction,
 )
 from app.seed import get_or_create_category
 from app.statements import find_recurring_transactions, normalize_description
@@ -36,12 +43,12 @@ _FREQUENCY_BY_LABEL = {f.value: f for f in Frequency}
 
 def classify_transactions(transactions: list[dict]) -> list[dict]:
     """Attach a best-guess `category` to each transaction dict, by description."""
-    return [{**t, "category": classify(str(t.get("description", ""))) or UNCATEGORIZED}
-            for t in transactions]
+    return [{**t, "category": classify(str(t.get("description", ""))) or UNCATEGORIZED} for t in transactions]
 
 
-def match_budget_item(session: Session, account_id: int, description: str,
-                       as_of: dt.date) -> BudgetItem | None:
+def match_budget_item(
+    session: Session, account_id: int, description: str, as_of: dt.date
+) -> BudgetItem | None:
     """Find an active BudgetItem on this account whose description overlaps
     this transaction's — used both to link a transaction to the item it pays
     for, and to check whether a recurring transaction group already has a
@@ -65,9 +72,14 @@ def match_budget_item(session: Session, account_id: int, description: str,
     return None
 
 
-def import_statement(session: Session, account: Account, transactions: list[dict],
-                      period_start: dt.date, period_end: dt.date,
-                      source_note: str | None = None) -> Statement:
+def import_statement(
+    session: Session,
+    account: Account,
+    transactions: list[dict],
+    period_start: dt.date,
+    period_end: dt.date,
+    source_note: str | None = None,
+) -> Statement:
     """Classify and persist a billing period's transactions, update the
     account balance, and refresh this account's budget suggestions.
 
@@ -99,8 +111,9 @@ def import_statement(session: Session, account: Account, transactions: list[dict
 
     classified = classify_transactions(transactions)
 
-    statement = Statement(account=account, period_start=period_start, period_end=period_end,
-                           source_note=source_note)
+    statement = Statement(
+        account=account, period_start=period_start, period_end=period_end, source_note=source_note
+    )
     session.add(statement)
     session.flush()
 
@@ -112,14 +125,16 @@ def import_statement(session: Session, account: Account, transactions: list[dict
         net += amount
         category = get_or_create_category(session, t["category"])
         matched = match_budget_item(session, account.id, str(t["description"]), date)
-        session.add(Transaction(
-            statement=statement,
-            date=date,
-            description=str(t["description"]),
-            amount=amount,
-            category=category,
-            matched_budget_item=matched,
-        ))
+        session.add(
+            Transaction(
+                statement=statement,
+                date=date,
+                description=str(t["description"]),
+                amount=amount,
+                category=category,
+                matched_budget_item=matched,
+            )
+        )
 
     account.current_balance += net
     account.balance_as_of = period_end
@@ -154,8 +169,13 @@ def budget_vs_actual_report(session: Session, statement: Statement) -> dict:
 
     expected_by_item: dict[int, float] = {}
     for item in items:
-        occurrences = generate_occurrences(item.effective_from, item.effective_until, item.frequency,
-                                            statement.period_start, statement.period_end)
+        occurrences = generate_occurrences(
+            item.effective_from,
+            item.effective_until,
+            item.frequency,
+            statement.period_start,
+            statement.period_end,
+        )
         if not occurrences:
             continue
         signed = item.amount if item.flow_type == FlowType.INCOME else -item.amount
@@ -183,8 +203,12 @@ def budget_vs_actual_report(session: Session, statement: Statement) -> dict:
         category_rows["Unbudgeted"]["actual"] += sum(t.amount for t in unmatched)
 
     by_category = [
-        {"category": cat, "budgeted": round(v["budgeted"], 2), "actual": round(v["actual"], 2),
-         "variance": round(v["actual"] - v["budgeted"], 2)}
+        {
+            "category": cat,
+            "budgeted": round(v["budgeted"], 2),
+            "actual": round(v["actual"], 2),
+            "variance": round(v["actual"] - v["budgeted"], 2),
+        }
         for cat, v in sorted(category_rows.items())
     ]
     total_budgeted = sum(v["budgeted"] for v in category_rows.values())
@@ -213,10 +237,18 @@ def _infer_category(group: dict) -> str:
     return classify(sample) or UNCATEGORIZED
 
 
-def _upsert_suggestion(session: Session, account: Account, suggestion_type: SuggestionType,
-                        description: str, category_name: str, proposed_amount: float,
-                        proposed_frequency: Frequency, budget_item: BudgetItem | None,
-                        current_amount: float | None, rationale: str) -> BudgetSuggestion | None:
+def _upsert_suggestion(
+    session: Session,
+    account: Account,
+    suggestion_type: SuggestionType,
+    description: str,
+    category_name: str,
+    proposed_amount: float,
+    proposed_frequency: Frequency,
+    budget_item: BudgetItem | None,
+    current_amount: float | None,
+    rationale: str,
+) -> BudgetSuggestion | None:
     existing = (
         session.query(BudgetSuggestion)
         .filter_by(account_id=account.id, description=description, suggestion_type=suggestion_type)
@@ -254,14 +286,8 @@ def generate_suggestions(session: Session, account: Account) -> list[BudgetSugge
     transaction history (not just the statement just imported — more history
     gives a stronger recurring-transaction signal over time).
     """
-    rows = (
-        session.query(Transaction)
-        .join(Statement)
-        .filter(Statement.account_id == account.id)
-        .all()
-    )
-    tx_dicts = [{"date": t.date.isoformat(), "description": t.description, "amount": t.amount}
-                for t in rows]
+    rows = session.query(Transaction).join(Statement).filter(Statement.account_id == account.id).all()
+    tx_dicts = [{"date": t.date.isoformat(), "description": t.description, "amount": t.amount} for t in rows]
     groups = find_recurring_transactions(tx_dicts)
 
     touched: list[BudgetSuggestion] = []
@@ -274,30 +300,41 @@ def generate_suggestions(session: Session, account: Account) -> list[BudgetSugge
             if group["direction"] == "in":
                 continue  # only auto-suggest expense items — income recurrences are usually salary/transfers
             suggestion = _upsert_suggestion(
-                session, account, SuggestionType.NEW_ITEM,
+                session,
+                account,
+                SuggestionType.NEW_ITEM,
                 description=description,
                 category_name=_infer_category(group),
                 proposed_amount=group["avg_amount"],
                 proposed_frequency=_guessed_to_frequency(group["guessed_frequency"]),
                 budget_item=None,
                 current_amount=None,
-                rationale=(f"Seen {group['occurrences']}x between {group['first_date']} and "
-                           f"{group['last_date']}, avg £{group['avg_amount']:.2f}, no matching budget item."),
+                rationale=(
+                    f"Seen {group['occurrences']}x between {group['first_date']} and "
+                    f"{group['last_date']}, avg £{group['avg_amount']:.2f}, no matching budget item."
+                ),
             )
         else:
             diff = abs(matched_item.amount - group["avg_amount"])
-            if diff <= AMOUNT_CHANGE_TOLERANCE_ABS or diff <= matched_item.amount * AMOUNT_CHANGE_TOLERANCE_PCT:
+            if (
+                diff <= AMOUNT_CHANGE_TOLERANCE_ABS
+                or diff <= matched_item.amount * AMOUNT_CHANGE_TOLERANCE_PCT
+            ):
                 continue
             suggestion = _upsert_suggestion(
-                session, account, SuggestionType.AMOUNT_CHANGE,
+                session,
+                account,
+                SuggestionType.AMOUNT_CHANGE,
                 description=matched_item.description,
                 category_name=matched_item.category.name,
                 proposed_amount=group["avg_amount"],
                 proposed_frequency=matched_item.frequency,
                 budget_item=matched_item,
                 current_amount=matched_item.amount,
-                rationale=(f"Actual avg £{group['avg_amount']:.2f} over {group['occurrences']} occurrences "
-                           f"differs from budgeted £{matched_item.amount:.2f}."),
+                rationale=(
+                    f"Actual avg £{group['avg_amount']:.2f} over {group['occurrences']} occurrences "
+                    f"differs from budgeted £{matched_item.amount:.2f}."
+                ),
             )
         if suggestion is not None:
             touched.append(suggestion)

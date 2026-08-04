@@ -34,11 +34,16 @@ def load_all_transactions(folder: Path) -> list[dict]:
     for f in monzo_files:
         account = "Personal Monzo" if "copy" in f.stem.lower() else "Joint Monzo"
         for t in extract_csv_transactions(str(f)):
-            txns.append({
-                "date": t["date"], "description": t["description"], "amount": t["amount"],
-                "account": account, "source_file": f.name,
-                "bank_category_hint": t.get("category_hint") or None,
-            })
+            txns.append(
+                {
+                    "date": t["date"],
+                    "description": t["description"],
+                    "amount": t["amount"],
+                    "account": account,
+                    "source_file": f.name,
+                    "bank_category_hint": t.get("category_hint") or None,
+                }
+            )
 
     for f in sorted(folder.glob("*Premier Bank_Statement.pdf")):
         txns.extend(parse_hsbc_premier(f, "Personal HSBC"))
@@ -59,8 +64,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("folder", type=Path)
     ap.add_argument("--out", type=Path, default=None, help="write full classified CSV here")
-    ap.add_argument("--exclude-months", nargs="*", default=[],
-                     help="YYYY-MM months to exclude from the summary (e.g. a partial current month)")
+    ap.add_argument(
+        "--exclude-months",
+        nargs="*",
+        default=[],
+        help="YYYY-MM months to exclude from the summary (e.g. a partial current month)",
+    )
     args = ap.parse_args()
 
     # Monzo's own per-transaction category is a reasonable fallback when our
@@ -68,9 +77,15 @@ def main():
     # ours; Monzo's "Bills"/"General"/"Finances" are too much of a catch-all
     # to trust blindly, so those are left for manual review.
     monzo_fallback_map = {
-        "Eating out": "Eating out", "Groceries": "Groceries", "Entertainment": "Entertainment",
-        "Shopping": "Shopping", "Holidays": "Holidays", "Transport": "Transport",
-        "Transfers": "Transfers", "Savings": "Transfers", "Income": "Income",
+        "Eating out": "Eating out",
+        "Groceries": "Groceries",
+        "Entertainment": "Entertainment",
+        "Shopping": "Shopping",
+        "Holidays": "Holidays",
+        "Transport": "Transport",
+        "Transfers": "Transfers",
+        "Savings": "Transfers",
+        "Income": "Income",
     }
 
     folder = args.folder.expanduser()
@@ -107,7 +122,9 @@ def main():
         by_cat[cat]["months"][t["date"][:7]] += -t["amount"]
 
     print(f"{len(txns)} total transactions, {len(spend)} spend transactions, £{total_spend:,.2f} total spend")
-    print(f"{len(unclassified)} unclassified spend transactions (£{sum(-t['amount'] for t in unclassified):,.2f})\n")
+    print(
+        f"{len(unclassified)} unclassified spend transactions (£{sum(-t['amount'] for t in unclassified):,.2f})\n"
+    )
 
     print(f"{'Category':<20}{'n':>5}{'Total':>12}{'Avg/mo':>10}{'Median/mo':>12}")
     for cat, d in sorted(by_cat.items(), key=lambda kv: -kv[1]["total"]):

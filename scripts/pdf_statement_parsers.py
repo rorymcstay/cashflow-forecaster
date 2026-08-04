@@ -13,8 +13,12 @@ from pathlib import Path
 
 import pdfplumber
 
-MONTHS = {m: i + 1 for i, m in enumerate(
-    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
+MONTHS = {
+    m: i + 1
+    for i, m in enumerate(
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    )
+}
 
 
 # ---------------------------------------------------------------------------
@@ -94,13 +98,15 @@ def parse_hsbc_premier(path: Path, account: str) -> list[dict]:
                 if paid_out is not None or paid_in is not None:
                     if full_desc:
                         amt = paid_out if paid_out is not None else paid_in
-                        transactions.append({
-                            "date": current_date,
-                            "description": full_desc,
-                            "amount": -amt if paid_out is not None else amt,
-                            "account": account,
-                            "source_file": path.name,
-                        })
+                        transactions.append(
+                            {
+                                "date": current_date,
+                                "description": full_desc,
+                                "amount": -amt if paid_out is not None else amt,
+                                "account": account,
+                                "source_file": path.name,
+                            }
+                        )
                     desc_words = []
     return transactions
 
@@ -139,7 +145,7 @@ def parse_amex(path: Path, account: str, year: int) -> list[dict]:
         if not amt_m:
             continue
         amount = float(amt_m.group(1).replace(",", ""))
-        desc = rest[:amt_m.start()].strip()
+        desc = rest[: amt_m.start()].strip()
         month_num = MONTHS.get(mon2)
         if not month_num:
             continue
@@ -160,11 +166,13 @@ def parse_amex(path: Path, account: str, year: int) -> list[dict]:
                 is_credit = True
                 break
 
-        transactions.append({
-            "date": date,
-            "description": desc,
-            "amount": amount if is_credit else -amount,
-            "account": account,
-            "source_file": path.name,
-        })
+        transactions.append(
+            {
+                "date": date,
+                "description": desc,
+                "amount": amount if is_credit else -amount,
+                "account": account,
+                "source_file": path.name,
+            }
+        )
     return transactions

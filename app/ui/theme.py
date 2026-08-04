@@ -22,8 +22,8 @@ ACCENT_HOVER = "#6C99F2"
 ACCENT_PRESSED = "#4A78D6"
 ACCENT_TEXT = "#FFFFFF"
 
-SECTION_BG = "#20283A"   # section header rows (INCOME / EXPENSE / etc.)
-TOTAL_BG = "#243352"     # subtotal + net/summary rows
+SECTION_BG = "#20283A"  # section header rows (INCOME / EXPENSE / etc.)
+TOTAL_BG = "#243352"  # subtotal + net/summary rows
 
 WARNING = "#F2555C"
 WARNING_BG = "#3A2429"
@@ -62,6 +62,7 @@ def build_palette():
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(TEXT_MUTED))
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(TEXT_MUTED))
     return palette
+
 
 STYLESHEET = f"""
 QWidget {{

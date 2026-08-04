@@ -10,12 +10,23 @@ import pdfplumber
 MONZO_EXPECTED_COLUMNS = {"Transaction ID", "Date", "Amount"}
 
 _DATE_FORMATS = (
-    "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y", "%d %b %Y", "%d %B %Y", "%d %b %y",
+    "%d/%m/%Y",
+    "%Y-%m-%d",
+    "%m/%d/%Y",
+    "%d-%m-%Y",
+    "%d %b %Y",
+    "%d %B %Y",
+    "%d %b %y",
 )
 
 _FREQUENCY_ANCHORS = (
-    (7, "Weekly"), (14, "Fortnightly"), (28, "4-Weekly"), (30.4, "Monthly"),
-    (91, "Quarterly"), (182, "6-Monthly"), (365, "Annually"),
+    (7, "Weekly"),
+    (14, "Fortnightly"),
+    (28, "4-Weekly"),
+    (30.4, "Monthly"),
+    (91, "Quarterly"),
+    (182, "6-Monthly"),
+    (365, "Annually"),
 )
 
 
@@ -81,21 +92,26 @@ def extract_csv_transactions(file_path: str) -> list[dict]:
                 amount = float(row.get("Amount", "0") or 0)
             except ValueError:
                 continue
-            transactions.append({
-                "date": date.isoformat(),
-                "description": row.get("Name") or row.get("Description") or "",
-                "amount": amount,
-                "category_hint": row.get("Category", ""),
-                "source_format": "monzo_csv",
-            })
+            transactions.append(
+                {
+                    "date": date.isoformat(),
+                    "description": row.get("Name") or row.get("Description") or "",
+                    "amount": amount,
+                    "category_hint": row.get("Category", ""),
+                    "source_format": "monzo_csv",
+                }
+            )
         return transactions
 
     fields_lower = {fn.lower(): fn for fn in fieldnames}
     date_col = next((fields_lower[k] for k in fields_lower if "date" in k), None)
     amount_col = next((fields_lower[k] for k in fields_lower if "amount" in k), None)
     desc_col = next(
-        (fields_lower[k] for k in fields_lower
-         if k in ("description", "name", "payee", "merchant", "memo", "details")),
+        (
+            fields_lower[k]
+            for k in fields_lower
+            if k in ("description", "name", "payee", "merchant", "memo", "details")
+        ),
         None,
     )
     if not (date_col and amount_col):
@@ -114,13 +130,15 @@ def extract_csv_transactions(file_path: str) -> list[dict]:
             amount = float(raw_amount)
         except ValueError:
             continue
-        transactions.append({
-            "date": date.isoformat(),
-            "description": row.get(desc_col, "") if desc_col else "",
-            "amount": amount,
-            "category_hint": "",
-            "source_format": "generic_csv",
-        })
+        transactions.append(
+            {
+                "date": date.isoformat(),
+                "description": row.get(desc_col, "") if desc_col else "",
+                "amount": amount,
+                "category_hint": "",
+                "source_format": "generic_csv",
+            }
+        )
     return transactions
 
 
@@ -139,8 +157,9 @@ def _guess_frequency(gaps_days: list[int]) -> str:
     return min(_FREQUENCY_ANCHORS, key=lambda c: abs(c[0] - median_gap))[1]
 
 
-def find_recurring_transactions(transactions: list[dict], min_occurrences: int = 2,
-                                 amount_tolerance_pct: float = 0.15) -> list[dict]:
+def find_recurring_transactions(
+    transactions: list[dict], min_occurrences: int = 2, amount_tolerance_pct: float = 0.15
+) -> list[dict]:
     """Group transactions by normalised merchant name and flag candidates
     that look like a recurring bill.
 
@@ -176,19 +195,21 @@ def find_recurring_transactions(transactions: list[dict], min_occurrences: int =
         gaps = [(b - a).days for a, b in zip(dates, dates[1:])]
         days_of_month = [d.day for d in dates]
 
-        results.append({
-            "description": key,
-            "sample_descriptions": sorted({str(i["description"]) for i in items})[:3],
-            "occurrences": len(items),
-            "first_date": dates[0].isoformat(),
-            "last_date": dates[-1].isoformat(),
-            "avg_amount": round(avg, 2),
-            "min_amount": round(min(amounts), 2),
-            "max_amount": round(max(amounts), 2),
-            "typical_day_of_month": statistics.mode(days_of_month),
-            "guessed_frequency": _guess_frequency(gaps),
-            "direction": "in" if statistics.mean([float(i["amount"]) for i in items]) > 0 else "out",
-        })
+        results.append(
+            {
+                "description": key,
+                "sample_descriptions": sorted({str(i["description"]) for i in items})[:3],
+                "occurrences": len(items),
+                "first_date": dates[0].isoformat(),
+                "last_date": dates[-1].isoformat(),
+                "avg_amount": round(avg, 2),
+                "min_amount": round(min(amounts), 2),
+                "max_amount": round(max(amounts), 2),
+                "typical_day_of_month": statistics.mode(days_of_month),
+                "guessed_frequency": _guess_frequency(gaps),
+                "direction": "in" if statistics.mean([float(i["amount"]) for i in items]) > 0 else "out",
+            }
+        )
 
     results.sort(key=lambda r: -r["occurrences"])
     return results

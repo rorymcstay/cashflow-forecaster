@@ -14,3 +14,19 @@ dependencies = [
     "python-dateutil>=2.9.0.post0",
     "sqlalchemy>=2.0.51",
 ]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.1",
+    "ty>=0.0.66",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -3,6 +3,7 @@
 Run with: QT_QPA_PLATFORM=offscreen uv run scripts/generate_icon.py
 Re-run after changing the palette in app/ui/theme to keep the logo in sync.
 """
+
 import sys
 from pathlib import Path
 

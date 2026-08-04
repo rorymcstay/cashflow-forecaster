@@ -20,8 +20,9 @@ PERIOD_MONTHS = {
 }
 
 
-def generate_occurrences(anchor: dt.date, until: dt.date | None, frequency: Frequency,
-                          range_start: dt.date, range_end: dt.date) -> list[dt.date]:
+def generate_occurrences(
+    anchor: dt.date, until: dt.date | None, frequency: Frequency, range_start: dt.date, range_end: dt.date
+) -> list[dt.date]:
     """All occurrence dates of a recurring item that fall within [range_start, range_end]."""
     effective_end = range_end if until is None else min(range_end, until)
     if effective_end < range_start or anchor > effective_end:
@@ -64,37 +65,49 @@ def monthly_budget_summary(session: Session, as_of: dt.date | None = None) -> pl
             "category": item.category.name,
             "monthly_amount": item.monthly_equivalent,
         }
-        for item in items if item.is_active_on(as_of)
+        for item in items
+        if item.is_active_on(as_of)
     ]
     if not rows:
         return pl.DataFrame(schema={"flow_type": pl.Utf8, "category": pl.Utf8, "monthly_amount": pl.Float64})
     df = pl.DataFrame(rows)
-    return (df.group_by(["flow_type", "category"])
-              .agg(pl.col("monthly_amount").sum())
-              .sort(["flow_type", "category"]))
+    return (
+        df.group_by(["flow_type", "category"])
+        .agg(pl.col("monthly_amount").sum())
+        .sort(["flow_type", "category"])
+    )
 
 
 _EMPTY_FORECAST_SCHEMA = {
-    "date": pl.Date, "in": pl.Float64, "out": pl.Float64, "net": pl.Float64,
-    "balance": pl.Float64, "below_threshold": pl.Boolean, "details": pl.Utf8,
+    "date": pl.Date,
+    "in": pl.Float64,
+    "out": pl.Float64,
+    "net": pl.Float64,
+    "balance": pl.Float64,
+    "below_threshold": pl.Boolean,
+    "details": pl.Utf8,
 }
 
 
-def _collect_account_events(session: Session, account: Account,
-                             compute_start: dt.date, compute_end: dt.date) -> list[tuple[dt.date, float, str]]:
+def _collect_account_events(
+    session: Session, account: Account, compute_start: dt.date, compute_end: dt.date
+) -> list[tuple[dt.date, float, str]]:
     """(date, signed_amount, description) for every occurrence of this account's
     budget items and upcoming expenses within [compute_start, compute_end]."""
     events: list[tuple[dt.date, float, str]] = []
     for item in session.query(BudgetItem).filter_by(account_id=account.id).all():
         signed = item.amount if item.flow_type == FlowType.INCOME else -item.amount
-        for occ in generate_occurrences(item.effective_from, item.effective_until, item.frequency,
-                                         compute_start, compute_end):
+        for occ in generate_occurrences(
+            item.effective_from, item.effective_until, item.frequency, compute_start, compute_end
+        ):
             events.append((occ, signed, item.description))
 
-    for exp in (session.query(UpcomingExpense)
-                .filter(UpcomingExpense.account_id == account.id)
-                .filter(UpcomingExpense.date >= compute_start)
-                .filter(UpcomingExpense.date <= compute_end)):
+    for exp in (
+        session.query(UpcomingExpense)
+        .filter(UpcomingExpense.account_id == account.id)
+        .filter(UpcomingExpense.date >= compute_start)
+        .filter(UpcomingExpense.date <= compute_end)
+    ):
         events.append((exp.date, -exp.amount, exp.description))
 
     return events
@@ -108,8 +121,9 @@ def _details_by_date(events: list[tuple[dt.date, float, str]]) -> dict[dt.date, 
     return {d: "; ".join(items) for d, items in grouped.items()}
 
 
-def account_daily_forecast(session: Session, account: Account,
-                            range_start: dt.date, range_end: dt.date) -> pl.DataFrame:
+def account_daily_forecast(
+    session: Session, account: Account, range_start: dt.date, range_end: dt.date
+) -> pl.DataFrame:
     """Daily in/out/net/balance/details for one account, sliced to [range_start, range_end].
 
     Internally the running balance is computed forward from account.balance_as_of
@@ -131,25 +145,28 @@ def account_daily_forecast(session: Session, account: Account,
 
     if events:
         ev_df = pl.DataFrame([(d, a) for d, a, _ in events], schema=["date", "amount"], orient="row")
-        in_df = (ev_df.filter(pl.col("amount") > 0).group_by("date")
-                 .agg(pl.col("amount").sum().alias("in")))
-        out_df = (ev_df.filter(pl.col("amount") < 0).group_by("date")
-                  .agg((-pl.col("amount")).sum().alias("out")))
+        in_df = ev_df.filter(pl.col("amount") > 0).group_by("date").agg(pl.col("amount").sum().alias("in"))
+        out_df = (
+            ev_df.filter(pl.col("amount") < 0).group_by("date").agg((-pl.col("amount")).sum().alias("out"))
+        )
     else:
         in_df = pl.DataFrame(schema={"date": pl.Date, "in": pl.Float64})
         out_df = pl.DataFrame(schema={"date": pl.Date, "out": pl.Float64})
 
-    df = (base.join(in_df, on="date", how="left")
-              .join(out_df, on="date", how="left")
-              .with_columns([pl.col("in").fill_null(0.0), pl.col("out").fill_null(0.0)])
-              .with_columns((pl.col("in") - pl.col("out")).alias("net"))
-              .sort("date"))
+    df = (
+        base.join(in_df, on="date", how="left")
+        .join(out_df, on="date", how="left")
+        .with_columns([pl.col("in").fill_null(0.0), pl.col("out").fill_null(0.0)])
+        .with_columns((pl.col("in") - pl.col("out")).alias("net"))
+        .sort("date")
+    )
 
     first_net = df["net"][0]
-    df = (df.with_columns(pl.col("net").cum_sum().alias("_cum"))
-            .with_columns((pl.lit(account.current_balance) + pl.col("_cum") - pl.lit(first_net))
-                          .alias("balance"))
-            .drop("_cum"))
+    df = (
+        df.with_columns(pl.col("net").cum_sum().alias("_cum"))
+        .with_columns((pl.lit(account.current_balance) + pl.col("_cum") - pl.lit(first_net)).alias("balance"))
+        .drop("_cum")
+    )
 
     if account.low_balance_threshold is not None:
         df = df.with_columns((pl.col("balance") < account.low_balance_threshold).alias("below_threshold"))
@@ -167,8 +184,14 @@ def combined_daily_forecast(session: Session, range_start: dt.date, range_end: d
     balance_as_of onward, plus a per-account balance breakdown and a details
     column listing every contributing item that day (prefixed by account)."""
     accounts = session.query(Account).all()
-    empty_schema = {"date": pl.Date, "in": pl.Float64, "out": pl.Float64, "net": pl.Float64,
-                     "balance": pl.Float64, "details": pl.Utf8}
+    empty_schema = {
+        "date": pl.Date,
+        "in": pl.Float64,
+        "out": pl.Float64,
+        "net": pl.Float64,
+        "balance": pl.Float64,
+        "details": pl.Utf8,
+    }
     if not accounts:
         return pl.DataFrame(schema=empty_schema)
 
@@ -183,9 +206,16 @@ def combined_daily_forecast(session: Session, range_start: dt.date, range_end: d
         df = account_daily_forecast(session, account, effective_start, range_end)
         if df.height == 0:
             continue
-        per_account.append(df.select(["date", "in", "out", "net", "balance"])
-                              .rename({"in": f"{account.name} in", "out": f"{account.name} out",
-                                       "net": f"{account.name} net", "balance": account.name}))
+        per_account.append(
+            df.select(["date", "in", "out", "net", "balance"]).rename(
+                {
+                    "in": f"{account.name} in",
+                    "out": f"{account.name} out",
+                    "net": f"{account.name} net",
+                    "balance": account.name,
+                }
+            )
+        )
         for row in df.iter_rows(named=True):
             if row["details"]:
                 all_details[row["date"]].append(f"{account.name}: {row['details']}")
@@ -201,19 +231,31 @@ def combined_daily_forecast(session: Session, range_start: dt.date, range_end: d
     in_cols = [f"{a.name} in" for a in accounts if f"{a.name} in" in merged.columns]
     out_cols = [f"{a.name} out" for a in accounts if f"{a.name} out" in merged.columns]
 
-    merged = merged.with_columns([
-        pl.sum_horizontal(balance_cols).alias("balance"),
-        pl.sum_horizontal(in_cols).alias("in"),
-        pl.sum_horizontal(out_cols).alias("out"),
-    ])
+    merged = merged.with_columns(
+        [
+            pl.sum_horizontal(balance_cols).alias("balance"),
+            pl.sum_horizontal(in_cols).alias("in"),
+            pl.sum_horizontal(out_cols).alias("out"),
+        ]
+    )
     merged = merged.with_columns((pl.col("in") - pl.col("out")).alias("net"))
 
     details_col = ["; ".join(all_details.get(d, [])) for d in merged["date"].to_list()]
     merged = merged.with_columns(pl.Series("details", details_col))
 
     net_cols = [f"{a.name} net" for a in accounts if f"{a.name} net" in merged.columns]
-    return merged.select(["date", "in", "out", "net", "balance", "details", *balance_cols,
-                           *[c for c in merged.columns if c in in_cols + out_cols + net_cols]])
+    return merged.select(
+        [
+            "date",
+            "in",
+            "out",
+            "net",
+            "balance",
+            "details",
+            *balance_cols,
+            *[c for c in merged.columns if c in in_cols + out_cols + net_cols],
+        ]
+    )
 
 
 def low_balance_warnings(session: Session, range_start: dt.date, range_end: dt.date) -> list[dict]:
@@ -224,10 +266,12 @@ def low_balance_warnings(session: Session, range_start: dt.date, range_end: dt.d
             continue
         df = account_daily_forecast(session, account, range_start, range_end)
         for row in df.filter(pl.col("below_threshold")).iter_rows(named=True):
-            warnings.append({
-                "account": account.name,
-                "date": row["date"],
-                "balance": row["balance"],
-                "threshold": account.low_balance_threshold,
-            })
+            warnings.append(
+                {
+                    "account": account.name,
+                    "date": row["date"],
+                    "balance": row["balance"],
+                    "threshold": account.low_balance_threshold,
+                }
+            )
     return warnings

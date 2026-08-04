@@ -2,8 +2,16 @@ import datetime as dt
 
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QFormLayout, QLabel, QLineEdit, QMessageBox,
+    QCheckBox,
+    QComboBox,
+    QDateEdit,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
 )
 from sqlalchemy.orm import Session
 
@@ -42,7 +50,9 @@ class AccountDialog(QDialog):
         self.as_of_edit.setCalendarPopup(True)
 
         self.threshold_check = QCheckBox("Warn when balance drops below")
-        self.threshold_spin = _amount_spinbox(obj.low_balance_threshold if obj and obj.low_balance_threshold else 0.0)
+        self.threshold_spin = _amount_spinbox(
+            obj.low_balance_threshold if obj and obj.low_balance_threshold else 0.0
+        )
         has_threshold = bool(obj and obj.low_balance_threshold is not None)
         self.threshold_check.setChecked(has_threshold)
         self.threshold_spin.setEnabled(has_threshold)
@@ -54,7 +64,9 @@ class AccountDialog(QDialog):
         form.addRow("Balance As Of", self.as_of_edit)
         form.addRow(self.threshold_check, self.threshold_spin)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(self.on_accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
@@ -118,7 +130,9 @@ class BudgetItemDialog(QDialog):
         self.from_edit.setCalendarPopup(True)
 
         self.has_until_check = QCheckBox("Has an end date")
-        self.until_edit = QDateEdit(_to_qdate(obj.effective_until if obj and obj.effective_until else dt.date.today()))
+        self.until_edit = QDateEdit(
+            _to_qdate(obj.effective_until if obj and obj.effective_until else dt.date.today())
+        )
         self.until_edit.setCalendarPopup(True)
         has_until = bool(obj and obj.effective_until is not None)
         self.has_until_check.setChecked(has_until)
@@ -153,7 +167,9 @@ class BudgetItemDialog(QDialog):
         form.addRow("Account", self.account_combo)
         form.addRow("Notes", self.notes_edit)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(self.on_accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
@@ -230,7 +246,9 @@ class TransactionCategoryDialog(QDialog):
         form.addRow("Amount", QLabel(f"£{transaction.amount:,.2f}"))
         form.addRow("Category", self.category_combo)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(self.on_accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
@@ -283,7 +301,9 @@ class UpcomingExpenseDialog(QDialog):
         form.addRow("Category", self.category_combo)
         form.addRow("Account", self.account_combo)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(self.on_accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)

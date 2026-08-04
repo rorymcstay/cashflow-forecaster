@@ -4,8 +4,16 @@ from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QSc
 from PySide6.QtCore import QDate, QDateTime, QPointF, Qt, QTime
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDateEdit, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView,
+    QComboBox,
+    QDateEdit,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 from sqlalchemy.orm import Session
 
@@ -71,7 +79,8 @@ class CashflowForecastScreen(QWidget):
         self.table = QTableWidget()
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(
-            ["Date", "Forecast In", "Forecast Out", "Net", "Balance", "Details"])
+            ["Date", "Forecast In", "Forecast Out", "Net", "Balance", "Details"]
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -137,11 +146,11 @@ class CashflowForecastScreen(QWidget):
         chart_view.setMinimumHeight(230)
         chart_view.setMaximumHeight(280)
         chart_view.setStyleSheet(
-            f"background-color: {theme.SURFACE}; border: 1px solid {theme.BORDER}; border-radius: 8px;")
+            f"background-color: {theme.SURFACE}; border: 1px solid {theme.BORDER}; border-radius: 8px;"
+        )
         return chart_view
 
-    def _update_chart(self, dates: list[dt.date], balances: list[float],
-                       threshold: float | None) -> None:
+    def _update_chart(self, dates: list[dt.date], balances: list[float], threshold: float | None) -> None:
         self._chart_dates = dates
         self._chart_balances = balances
 
@@ -155,8 +164,9 @@ class CashflowForecastScreen(QWidget):
 
         xs = [p.x() for p in points]
         ys = [p.y() for p in points]
-        self.x_axis.setRange(QDateTime.fromMSecsSinceEpoch(int(min(xs))),
-                              QDateTime.fromMSecsSinceEpoch(int(max(xs))))
+        self.x_axis.setRange(
+            QDateTime.fromMSecsSinceEpoch(int(min(xs))), QDateTime.fromMSecsSinceEpoch(int(max(xs)))
+        )
 
         y_min, y_max = min(ys), max(ys)
         if threshold is not None:
@@ -184,8 +194,9 @@ class CashflowForecastScreen(QWidget):
             return
         clicked_qdate = QDateTime.fromMSecsSinceEpoch(int(point.x())).date()
         clicked_date = dt.date(clicked_qdate.year(), clicked_qdate.month(), clicked_qdate.day())
-        closest_row = min(range(len(self._chart_dates)),
-                           key=lambda i: abs((self._chart_dates[i] - clicked_date).days))
+        closest_row = min(
+            range(len(self._chart_dates)), key=lambda i: abs((self._chart_dates[i] - clicked_date).days)
+        )
         self.table.selectRow(closest_row)
         self.table.scrollToItem(self.table.item(closest_row, 0))
 
@@ -230,7 +241,8 @@ class CashflowForecastScreen(QWidget):
         self.table.setRowCount(0)
         if df.height == 0:
             self.warnings_label.setText(
-                "No data for this range — the account's Balance As Of date is after the selected range.")
+                "No data for this range — the account's Balance As Of date is after the selected range."
+            )
             self._update_chart([], [], None)
             return
 

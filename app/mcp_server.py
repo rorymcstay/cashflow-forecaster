@@ -5,19 +5,36 @@ from mcp.server.mcpserver import MCPServer
 
 from app.db import get_session, init_db
 from app.forecast import (
-    account_daily_forecast, combined_daily_forecast, low_balance_warnings, monthly_budget_summary,
+    account_daily_forecast,
+    combined_daily_forecast,
+    low_balance_warnings,
+    monthly_budget_summary,
 )
 from app.models import (
-    Account, BudgetItem, BudgetSuggestion, Category, FlowType, Frequency, Statement, SuggestionStatus,
-    SuggestionType, Transaction, UpcomingExpense,
+    Account,
+    BudgetItem,
+    BudgetSuggestion,
+    Category,
+    FlowType,
+    Frequency,
+    Statement,
+    SuggestionStatus,
+    SuggestionType,
+    Transaction,
+    UpcomingExpense,
 )
 from app.seed import get_or_create_category, seed_defaults
 from app.statement_import import (
-    UNCATEGORIZED, accept_suggestion as _accept_suggestion, budget_vs_actual_report as _budget_vs_actual_report,
-    import_statement as _import_statement_core, reject_suggestion as _reject_suggestion,
+    UNCATEGORIZED,
+    accept_suggestion as _accept_suggestion,
+    budget_vs_actual_report as _budget_vs_actual_report,
+    import_statement as _import_statement_core,
+    reject_suggestion as _reject_suggestion,
 )
 from app.statements import (
-    extract_csv_transactions, find_recurring_transactions as _find_recurring, read_pdf_text as _read_pdf_text,
+    extract_csv_transactions,
+    find_recurring_transactions as _find_recurring,
+    read_pdf_text as _read_pdf_text,
 )
 
 server = MCPServer(
@@ -42,6 +59,7 @@ _seed_session.close()
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
 
 def _parse_date(value: str | None) -> dt.date | None:
     return dt.date.fromisoformat(value) if value else None
@@ -131,7 +149,9 @@ def _resolve_suggestion_status(value: str) -> SuggestionStatus:
     for s in SuggestionStatus:
         if s.value.lower() == value.lower() or s.name.lower() == value.lower():
             return s
-    raise ValueError(f"Unknown status '{value}'. Valid values: {[s.value for s in SuggestionStatus]}, or 'All'.")
+    raise ValueError(
+        f"Unknown status '{value}'. Valid values: {[s.value for s in SuggestionStatus]}, or 'All'."
+    )
 
 
 def _resolve_account(session, name: str) -> Account:
@@ -159,6 +179,7 @@ def _resolve_flow_type(value: str) -> FlowType:
 # ---------------------------------------------------------------------------
 # statement analysis
 # ---------------------------------------------------------------------------
+
 
 @server.tool()
 def read_pdf_statement(file_path: str, first_page: int = 1, last_page: int | None = None) -> str:
@@ -188,8 +209,9 @@ def extract_csv_statement(file_path: str) -> list[dict]:
 
 
 @server.tool()
-def find_recurring_transactions(transactions: list[dict], min_occurrences: int = 2,
-                                 amount_tolerance_pct: float = 0.15) -> list[dict]:
+def find_recurring_transactions(
+    transactions: list[dict], min_occurrences: int = 2, amount_tolerance_pct: float = 0.15
+) -> list[dict]:
     """Group transactions by normalised merchant name and flag recurring-bill candidates.
 
     Each transaction dict needs `date` (ISO string), `description`, and
@@ -207,9 +229,15 @@ def find_recurring_transactions(transactions: list[dict], min_occurrences: int =
 # statement import / budget suggestions
 # ---------------------------------------------------------------------------
 
+
 @server.tool()
-def import_statement(account: str, transactions: list[dict], period_start: str | None = None,
-                      period_end: str | None = None, source_note: str | None = None) -> dict:
+def import_statement(
+    account: str,
+    transactions: list[dict],
+    period_start: str | None = None,
+    period_end: str | None = None,
+    source_note: str | None = None,
+) -> dict:
     """Save a billing period's transactions, classify them, update the account
     balance, and refresh this account's budget suggestions.
 
@@ -234,8 +262,10 @@ def import_statement(account: str, transactions: list[dict], period_start: str |
         acc = _resolve_account(session, account)
         if not transactions:
             raise ValueError("No transactions to import.")
-        dates = [t["date"] if isinstance(t["date"], dt.date) else dt.date.fromisoformat(t["date"])
-                 for t in transactions]
+        dates = [
+            t["date"] if isinstance(t["date"], dt.date) else dt.date.fromisoformat(t["date"])
+            for t in transactions
+        ]
         start = _parse_date(period_start) or min(dates)
         end = _parse_date(period_end) or max(dates)
 
@@ -284,9 +314,14 @@ def get_statement_report(statement_id: int) -> dict:
 
 
 @server.tool()
-def list_transactions(statement_id: int | None = None, account: str | None = None,
-                       start_date: str | None = None, end_date: str | None = None,
-                       category: str | None = None, uncategorized_only: bool = False) -> list[dict]:
+def list_transactions(
+    statement_id: int | None = None,
+    account: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    category: str | None = None,
+    uncategorized_only: bool = False,
+) -> list[dict]:
     """List saved transactions, filtered by any combination of statement,
     account, date range, or category. Set uncategorized_only=True to find
     transactions the keyword classifier couldn't place, for manual review
@@ -407,6 +442,7 @@ def reject_budget_suggestion(suggestion_id: int) -> dict:
 # accounts
 # ---------------------------------------------------------------------------
 
+
 @server.tool()
 def list_accounts() -> list[dict]:
     """List all accounts with their current balance, balance-as-of date, and low-balance threshold."""
@@ -418,8 +454,12 @@ def list_accounts() -> list[dict]:
 
 
 @server.tool()
-def create_account(name: str, current_balance: float = 0.0, balance_as_of: str | None = None,
-                    low_balance_threshold: float | None = None) -> dict:
+def create_account(
+    name: str,
+    current_balance: float = 0.0,
+    balance_as_of: str | None = None,
+    low_balance_threshold: float | None = None,
+) -> dict:
     """Create a new account. balance_as_of is an ISO date string (e.g. '2026-08-02'), defaults to today."""
     session = get_session()
     try:
@@ -439,9 +479,14 @@ def create_account(name: str, current_balance: float = 0.0, balance_as_of: str |
 
 
 @server.tool()
-def update_account(account_id: int, name: str | None = None, current_balance: float | None = None,
-                    balance_as_of: str | None = None, low_balance_threshold: float | None = None,
-                    clear_threshold: bool = False) -> dict:
+def update_account(
+    account_id: int,
+    name: str | None = None,
+    current_balance: float | None = None,
+    balance_as_of: str | None = None,
+    low_balance_threshold: float | None = None,
+    clear_threshold: bool = False,
+) -> dict:
     """Update an account. Only pass the fields you want to change; set clear_threshold=True to remove a warning threshold."""
     session = get_session()
     try:
@@ -491,6 +536,7 @@ def delete_account(account_id: int) -> dict:
 # categories
 # ---------------------------------------------------------------------------
 
+
 @server.tool()
 def list_categories() -> list[str]:
     """List all category names used to tag budget items and upcoming expenses."""
@@ -504,6 +550,7 @@ def list_categories() -> list[str]:
 # ---------------------------------------------------------------------------
 # budget items
 # ---------------------------------------------------------------------------
+
 
 @server.tool()
 def list_budget_items(active_only: bool = False, as_of: str | None = None) -> list[dict]:
@@ -524,10 +571,17 @@ def list_budget_items(active_only: bool = False, as_of: str | None = None) -> li
 
 
 @server.tool()
-def create_budget_item(description: str, amount: float, category: str, account: str,
-                        flow_type: str = "Expense", frequency: str = "Monthly",
-                        effective_from: str | None = None, effective_until: str | None = None,
-                        notes: str | None = None) -> dict:
+def create_budget_item(
+    description: str,
+    amount: float,
+    category: str,
+    account: str,
+    flow_type: str = "Expense",
+    frequency: str = "Monthly",
+    effective_from: str | None = None,
+    effective_until: str | None = None,
+    notes: str | None = None,
+) -> dict:
     """Add a committed recurring payment.
 
     flow_type: 'Income' or 'Expense'. frequency: Weekly, Fortnightly,
@@ -559,11 +613,19 @@ def create_budget_item(description: str, amount: float, category: str, account: 
 
 
 @server.tool()
-def update_budget_item(item_id: int, description: str | None = None, amount: float | None = None,
-                        category: str | None = None, account: str | None = None,
-                        flow_type: str | None = None, frequency: str | None = None,
-                        effective_from: str | None = None, effective_until: str | None = None,
-                        clear_effective_until: bool = False, notes: str | None = None) -> dict:
+def update_budget_item(
+    item_id: int,
+    description: str | None = None,
+    amount: float | None = None,
+    category: str | None = None,
+    account: str | None = None,
+    flow_type: str | None = None,
+    frequency: str | None = None,
+    effective_from: str | None = None,
+    effective_until: str | None = None,
+    clear_effective_until: bool = False,
+    notes: str | None = None,
+) -> dict:
     """Update a budget item. Only pass the fields you want to change."""
     session = get_session()
     try:
@@ -616,6 +678,7 @@ def delete_budget_item(item_id: int) -> dict:
 # upcoming expenses
 # ---------------------------------------------------------------------------
 
+
 @server.tool()
 def list_upcoming_expenses(start_date: str | None = None, end_date: str | None = None) -> list[dict]:
     """List one-off upcoming expenses, optionally filtered to a date range (ISO dates)."""
@@ -655,9 +718,14 @@ def create_upcoming_expense(date: str, description: str, amount: float, category
 
 
 @server.tool()
-def update_upcoming_expense(item_id: int, date: str | None = None, description: str | None = None,
-                             amount: float | None = None, category: str | None = None,
-                             account: str | None = None) -> dict:
+def update_upcoming_expense(
+    item_id: int,
+    date: str | None = None,
+    description: str | None = None,
+    amount: float | None = None,
+    category: str | None = None,
+    account: str | None = None,
+) -> dict:
     """Update a one-off upcoming expense. Only pass the fields you want to change."""
     session = get_session()
     try:
@@ -699,6 +767,7 @@ def delete_upcoming_expense(item_id: int) -> dict:
 # ---------------------------------------------------------------------------
 # budget summary + cashflow forecast
 # ---------------------------------------------------------------------------
+
 
 @server.tool()
 def get_budget_summary(as_of: str | None = None) -> dict:

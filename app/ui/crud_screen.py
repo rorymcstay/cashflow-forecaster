@@ -1,8 +1,17 @@
 from collections.abc import Callable
 
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QTableView, QVBoxLayout, QWidget,
+    QAbstractItemView,
+    QComboBox,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
 )
 from sqlalchemy.orm import Session
 
@@ -18,9 +27,16 @@ class CrudScreen(QWidget):
     backgrounds instead of the default per-row alternating colors.
     """
 
-    def __init__(self, session: Session, title: str, columns: list[tuple[str, Callable]],
-                 query_fn: Callable[[Session], list], dialog_cls, on_change: Callable | None = None,
-                 parent=None):
+    def __init__(
+        self,
+        session: Session,
+        title: str,
+        columns: list[tuple[str, Callable]],
+        query_fn: Callable[[Session], list],
+        dialog_cls,
+        on_change: Callable | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.session = session
         self.query_fn = query_fn
