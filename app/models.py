@@ -1,7 +1,7 @@
 import datetime as dt
 import enum
 
-from sqlalchemy import Date, DateTime, Enum, Float, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -12,6 +12,7 @@ class Base(DeclarativeBase):
 class FlowType(enum.Enum):
     INCOME = "Income"
     EXPENSE = "Expense"
+    TRANSFER = "Transfer"
 
 
 class Frequency(enum.Enum):
@@ -45,12 +46,56 @@ class Account(Base):
     current_balance: Mapped[float] = mapped_column(Float, default=0.0)
     balance_as_of: Mapped[dt.date] = mapped_column(Date, default=dt.date.today)
     low_balance_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Annual rate as a percentage (e.g. 4.5 for 4.5% APY), compounded monthly
+    # in the cashflow forecast for any account that has one set — independent
+    # of how the account is otherwise used.
+    growth_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    budget_items: Mapped[list["BudgetItem"]] = relationship(back_populates="account")
-    upcoming_expenses: Mapped[list["UpcomingExpense"]] = relationship(back_populates="account")
+    # Credit card autopay: on cc_payment_day each month, a direct debit is
+    # projected from cc_payee_account into this account, sized either to
+    # clear the outstanding balance (cc_pay_in_full) or to a fixed
+    # cc_fixed_payment_amount. Balance here follows the same sign convention
+    # as every other account — negative means money owed.
+    is_credit_card: Mapped[bool] = mapped_column(Boolean, default=False)
+    cc_payee_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
+    cc_payment_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cc_pay_in_full: Mapped[bool] = mapped_column(Boolean, default=False)
+    cc_fixed_payment_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    budget_items: Mapped[list["BudgetItem"]] = relationship(
+        back_populates="account", foreign_keys="BudgetItem.account_id"
+    )
+    upcoming_expenses: Mapped[list["UpcomingExpense"]] = relationship(
+        back_populates="account", foreign_keys="UpcomingExpense.account_id"
+    )
+    holdings: Mapped[list["Holding"]] = relationship(back_populates="account", cascade="all, delete-orphan")
+    cc_payee_account: Mapped["Account | None"] = relationship(
+        "Account", remote_side="Account.id", foreign_keys=[cc_payee_account_id]
+    )
 
     def __repr__(self) -> str:
         return self.name
+
+    @property
+    def portfolio_weights(self) -> dict[str, float]:
+        """{ticker: weight} for this account's holdings — presence of any
+        holdings marks it an investment account, driving both the historical
+        Monte Carlo simulation and (via the mean historical return) the
+        deterministic cashflow forecast."""
+        return {h.ticker: h.weight for h in self.holdings}
+
+
+class Holding(Base):
+    """A ticker + relative weight within an investment account's portfolio."""
+
+    __tablename__ = "holdings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    ticker: Mapped[str] = mapped_column(String(20))
+    weight: Mapped[float] = mapped_column(Float)
+
+    account: Mapped["Account"] = relationship(back_populates="holdings")
 
 
 class Category(Base):
@@ -80,9 +125,13 @@ class BudgetItem(Base):
 
     category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"))
     account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    # Destination account for flow_type == TRANSFER items — the recurring
+    # amount leaves `account` and is projected as an inflow here.
+    target_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
 
     category: Mapped["Category"] = relationship()
-    account: Mapped["Account"] = relationship(back_populates="budget_items")
+    account: Mapped["Account"] = relationship(back_populates="budget_items", foreign_keys=[account_id])
+    target_account: Mapped["Account | None"] = relationship(foreign_keys=[target_account_id])
 
     @property
     def monthly_equivalent(self) -> float:
@@ -96,6 +145,12 @@ class BudgetItem(Base):
         return True
 
 
+class UpcomingExpenseStatus(enum.Enum):
+    PENDING = "Pending"
+    ARCHIVED = "Archived"
+    NEEDS_REVIEW = "Needs Review"
+
+
 class UpcomingExpense(Base):
     """A one-off, dated item that isn't part of a recurring schedule."""
 
@@ -105,12 +160,27 @@ class UpcomingExpense(Base):
     date: Mapped[dt.date] = mapped_column(Date)
     description: Mapped[str] = mapped_column(String(120))
     amount: Mapped[float] = mapped_column(Float)
+    flow_type: Mapped[FlowType] = mapped_column(Enum(FlowType), default=FlowType.EXPENSE)
+    status: Mapped[UpcomingExpenseStatus] = mapped_column(
+        Enum(UpcomingExpenseStatus), default=UpcomingExpenseStatus.PENDING
+    )
 
     category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"))
     account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    # Destination account for flow_type == TRANSFER items — the amount leaves
+    # `account` and is projected as an inflow here, same as BudgetItem.
+    target_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
+    # Set when a statement covering this expense's date is imported: to the
+    # real transaction that matched it (status -> ARCHIVED), or left None
+    # with status -> NEEDS_REVIEW if nothing in that statement matched.
+    matched_transaction_id: Mapped[int | None] = mapped_column(ForeignKey("transactions.id"), nullable=True)
+    last_seen_statement_id: Mapped[int | None] = mapped_column(ForeignKey("statements.id"), nullable=True)
 
     category: Mapped["Category"] = relationship()
-    account: Mapped["Account"] = relationship(back_populates="upcoming_expenses")
+    account: Mapped["Account"] = relationship(back_populates="upcoming_expenses", foreign_keys=[account_id])
+    target_account: Mapped["Account | None"] = relationship(foreign_keys=[target_account_id])
+    matched_transaction: Mapped["Transaction | None"] = relationship()
+    last_seen_statement: Mapped["Statement | None"] = relationship()
 
 
 class Statement(Base):

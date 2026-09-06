@@ -1,3 +1,4 @@
+import csv
 import datetime as dt
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QScatterSeries, QValueAxis
@@ -5,24 +6,49 @@ from PySide6.QtCore import QDate, QDateTime, QPointF, Qt, QTime
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
+    QCheckBox,
     QComboBox,
     QDateEdit,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QTableWidgetSelectionRange,
     QVBoxLayout,
     QWidget,
 )
 from sqlalchemy.orm import Session
 
-from app.forecast import account_daily_forecast, combined_daily_forecast, low_balance_warnings
+from app.forecast import (
+    account_daily_forecast,
+    bucket_date_ranges,
+    combined_daily_forecast,
+    low_balance_warnings,
+)
 from app.models import Account
 from app.ui import theme
+from app.ui.widgets import AccountMultiSelect
 
 WARNING_BG = QColor(theme.WARNING_BG)
 HIGHLIGHT_FILL = QColor("#FFFFFF")
+
+# Distinct line colors for the "split by account" chart view, cycled if there
+# are more accounts than colors.
+ACCOUNT_COLORS = [
+    theme.ACCENT,
+    theme.SUCCESS,
+    theme.WARNING,
+    "#F2B705",
+    "#B45BEF",
+    "#05C7F2",
+    "#F2905B",
+    theme.TEXT_MUTED,
+]
+
+CHART_FREQUENCIES = ["Daily", "Weekly", "Monthly"]
 
 
 def _to_msecs(date: dt.date) -> float:
@@ -33,8 +59,11 @@ class CashflowForecastScreen(QWidget):
     def __init__(self, session: Session, parent=None):
         super().__init__(parent)
         self.session = session
+        self._table_dates: list[dt.date] = []
+        self._bucket_row_ranges: list[tuple[int, int]] = []
         self._chart_dates: list[dt.date] = []
         self._chart_balances: list[float] = []
+        self._split_mode_active = False
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<h2>Cash Flow Forecast</h2>"))
@@ -59,15 +88,41 @@ class CashflowForecastScreen(QWidget):
         controls.addWidget(self.end_edit)
 
         controls.addWidget(QLabel("Account:"))
-        self.account_combo = QComboBox()
-        self.account_combo.currentIndexChanged.connect(self.refresh)
-        controls.addWidget(self.account_combo)
+        self.account_select = AccountMultiSelect()
+        self.account_select.selectionChanged.connect(self._on_account_changed)
+        controls.addWidget(self.account_select)
 
         controls.addStretch()
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self.refresh)
         controls.addWidget(refresh_btn)
         layout.addLayout(controls)
+
+        controls2 = QHBoxLayout()
+        controls2.addWidget(QLabel("Chart points:"))
+        self.freq_combo = QComboBox()
+        for f in CHART_FREQUENCIES:
+            self.freq_combo.addItem(f, f)
+        self.freq_combo.currentIndexChanged.connect(self.refresh)
+        controls2.addWidget(self.freq_combo)
+
+        self.split_check = QCheckBox("Split chart by account")
+        self.split_check.toggled.connect(self.refresh)
+        controls2.addWidget(self.split_check)
+
+        self.rebase_check = QCheckBox("Rebase to 0 (change since start)")
+        self.rebase_check.toggled.connect(self.refresh)
+        controls2.addWidget(self.rebase_check)
+
+        controls2.addStretch()
+        copy_btn = QPushButton("Copy Table")
+        copy_btn.clicked.connect(self._copy_table)
+        controls2.addWidget(copy_btn)
+
+        export_btn = QPushButton("Export CSV…")
+        export_btn.clicked.connect(self._export_csv)
+        controls2.addWidget(export_btn)
+        layout.addLayout(controls2)
 
         self.warnings_label = QLabel()
         self.warnings_label.setWordWrap(True)
@@ -84,7 +139,7 @@ class CashflowForecastScreen(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ContiguousSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
         layout.addWidget(self.table)
@@ -97,18 +152,22 @@ class CashflowForecastScreen(QWidget):
     def _build_chart(self) -> QChartView:
         self.chart = QChart()
         self.chart.legend().hide()
+        self.chart.legend().setAlignment(Qt.AlignmentFlag.AlignBottom)
+        self.chart.legend().setLabelColor(QColor(theme.TEXT_MUTED))
         self.chart.setTitle("Balance")
         self.chart.setTitleBrush(QColor(theme.TEXT))
         self.chart.setBackgroundBrush(QColor(theme.SURFACE))
         self.chart.setBackgroundPen(QColor(theme.BORDER))
         self.chart.setPlotAreaBackgroundVisible(False)
 
-        self.balance_series = QLineSeries()
-        balance_pen = QPen(QColor(theme.ACCENT))
-        balance_pen.setWidthF(2.5)
-        self.balance_series.setPen(balance_pen)
-        self.balance_series.clicked.connect(self._on_chart_point_clicked)
-        self.chart.addSeries(self.balance_series)
+        self._balance_series_list: list[QLineSeries] = []
+
+        self.zero_series = QLineSeries()
+        zero_pen = QPen(QColor(theme.TEXT_MUTED))
+        zero_pen.setWidthF(1.0)
+        zero_pen.setStyle(Qt.PenStyle.DotLine)
+        self.zero_series.setPen(zero_pen)
+        self.chart.addSeries(self.zero_series)
 
         self.threshold_series = QLineSeries()
         threshold_pen = QPen(QColor(theme.WARNING))
@@ -137,7 +196,7 @@ class CashflowForecastScreen(QWidget):
         self.y_axis.setLinePenColor(QColor(theme.BORDER))
         self.chart.addAxis(self.y_axis, Qt.AlignmentFlag.AlignLeft)
 
-        for series in (self.balance_series, self.threshold_series, self.highlight_series):
+        for series in (self.zero_series, self.threshold_series, self.highlight_series):
             series.attachAxis(self.x_axis)
             series.attachAxis(self.y_axis)
 
@@ -150,73 +209,152 @@ class CashflowForecastScreen(QWidget):
         )
         return chart_view
 
-    def _update_chart(self, dates: list[dt.date], balances: list[float], threshold: float | None) -> None:
-        self._chart_dates = dates
-        self._chart_balances = balances
+    def _set_balance_series(self, series_specs: list[tuple[str, list[QPointF], str]]) -> None:
+        """Replace the chart's balance line(s). series_specs is a list of
+        (name, points, color_hex); a single unnamed series hides the legend,
+        multiple named ones (split-by-account) show it."""
+        for series in self._balance_series_list:
+            self.chart.removeSeries(series)
+        self._balance_series_list = []
 
-        points = [QPointF(_to_msecs(d), bal) for d, bal in zip(dates, balances)]
-        self.balance_series.replace(points)
+        for name, points, color in series_specs:
+            series = QLineSeries()
+            series.setName(name)
+            pen = QPen(QColor(color))
+            pen.setWidthF(2.5)
+            series.setPen(pen)
+            series.replace(points)
+            series.clicked.connect(self._on_chart_point_clicked)
+            self.chart.addSeries(series)
+            series.attachAxis(self.x_axis)
+            series.attachAxis(self.y_axis)
+            self._balance_series_list.append(series)
+
+        self.chart.legend().setVisible(len(series_specs) > 1)
+
+    def _update_chart(
+        self,
+        series_specs: list[tuple[str, list[QPointF], str]],
+        chart_dates: list[dt.date],
+        chart_balances: list[float],
+        threshold: float | None,
+    ) -> None:
+        self._chart_dates = chart_dates
+        self._chart_balances = chart_balances
+
+        self._set_balance_series(series_specs)
         self.highlight_series.clear()
 
-        if not points:
+        all_points = [p for _, points, _ in series_specs for p in points]
+        if not all_points:
             self.threshold_series.clear()
+            self.zero_series.clear()
             return
 
-        xs = [p.x() for p in points]
-        ys = [p.y() for p in points]
+        xs = [p.x() for p in all_points]
+        ys = [p.y() for p in all_points]
         self.x_axis.setRange(
             QDateTime.fromMSecsSinceEpoch(int(min(xs))), QDateTime.fromMSecsSinceEpoch(int(max(xs)))
         )
 
         y_min, y_max = min(ys), max(ys)
+        y_min = min(y_min, 0.0)
+        y_max = max(y_max, 0.0)
         if threshold is not None:
             y_min = min(y_min, threshold)
             y_max = max(y_max, threshold)
         pad = max((y_max - y_min) * 0.12, 10)
         self.y_axis.setRange(y_min - pad, y_max + pad)
 
+        self.zero_series.replace([QPointF(min(xs), 0.0), QPointF(max(xs), 0.0)])
+
         if threshold is not None:
-            self.threshold_series.replace([QPointF(xs[0], threshold), QPointF(xs[-1], threshold)])
+            self.threshold_series.replace([QPointF(min(xs), threshold), QPointF(max(xs), threshold)])
         else:
             self.threshold_series.clear()
 
+    def _bucket_index_for_row(self, row: int) -> int | None:
+        for i, (start, end) in enumerate(self._bucket_row_ranges):
+            if start <= row <= end:
+                return i
+        return None
+
     def _on_table_selection_changed(self) -> None:
         row = self.table.currentRow()
-        if row < 0 or row >= len(self._chart_dates):
+        if self._split_mode_active or row < 0 or row >= len(self._table_dates):
             self.highlight_series.clear()
             return
-        x = _to_msecs(self._chart_dates[row])
-        y = self._chart_balances[row]
+        bucket_idx = self._bucket_index_for_row(row)
+        if bucket_idx is None:
+            self.highlight_series.clear()
+            return
+        x = _to_msecs(self._chart_dates[bucket_idx])
+        y = self._chart_balances[bucket_idx]
         self.highlight_series.replace([QPointF(x, y)])
 
     def _on_chart_point_clicked(self, point: QPointF) -> None:
-        if not self._chart_dates:
+        if not self._chart_dates or not self._bucket_row_ranges:
             return
         clicked_qdate = QDateTime.fromMSecsSinceEpoch(int(point.x())).date()
         clicked_date = dt.date(clicked_qdate.year(), clicked_qdate.month(), clicked_qdate.day())
-        closest_row = min(
+        bucket_idx = min(
             range(len(self._chart_dates)), key=lambda i: abs((self._chart_dates[i] - clicked_date).days)
         )
-        self.table.selectRow(closest_row)
-        self.table.scrollToItem(self.table.item(closest_row, 0))
+        start_row, end_row = self._bucket_row_ranges[bucket_idx]
+
+        self.table.clearSelection()
+        self.table.setCurrentCell(start_row, 0)
+        self.table.setRangeSelected(
+            QTableWidgetSelectionRange(start_row, 0, end_row, self.table.columnCount() - 1), True
+        )
+        self.table.scrollToItem(self.table.item(start_row, 0))
 
     # -- data --------------------------------------------------------------
 
     def reload_accounts(self):
-        current = self.account_combo.currentData() if self.account_combo.count() else None
-        self.account_combo.blockSignals(True)
-        self.account_combo.clear()
-        self.account_combo.addItem("All Accounts (combined)", None)
-        for account in self.session.query(Account).order_by(Account.name).all():
-            self.account_combo.addItem(account.name, account.id)
-        idx = self.account_combo.findData(current)
-        self.account_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.account_combo.blockSignals(False)
+        accounts = self.session.query(Account).order_by(Account.name).all()
+        self.account_select.set_accounts(accounts)
+        self._update_split_check_enabled()
+
+    def _selected_accounts(self) -> list[Account]:
+        """Accounts to forecast for, honoring the multi-select."""
+        checked = self.account_select.checked_ids()
+        return self.session.query(Account).filter(Account.id.in_(checked)).order_by(Account.name).all()
+
+    def _update_split_check_enabled(self) -> None:
+        self.split_check.setEnabled(len(self._selected_accounts()) != 1)
+
+    def _on_account_changed(self):
+        self._update_split_check_enabled()
+        self.refresh()
 
     def _money_item(self, value: float) -> QTableWidgetItem:
         item = QTableWidgetItem(f"£{value:,.2f}")
         item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return item
+
+    def _table_to_rows(self) -> list[list[str]]:
+        headers = [self.table.horizontalHeaderItem(c).text() for c in range(self.table.columnCount())]
+        rows = [headers]
+        for r in range(self.table.rowCount()):
+            rows.append(
+                [
+                    self.table.item(r, c).text() if self.table.item(r, c) else ""
+                    for c in range(self.table.columnCount())
+                ]
+            )
+        return rows
+
+    def _copy_table(self):
+        rows = self._table_to_rows()
+        QApplication.clipboard().setText("\n".join("\t".join(row) for row in rows))
+
+    def _export_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export Cashflow", "cashflow.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+        with open(path, "w", newline="") as f:
+            csv.writer(f).writerows(self._table_to_rows())
 
     def refresh(self):
         sd, ed = self.start_edit.date(), self.end_edit.date()
@@ -226,24 +364,30 @@ class CashflowForecastScreen(QWidget):
         if range_end < range_start:
             self.table.setRowCount(0)
             self.warnings_label.setText("End date is before start date.")
-            self._update_chart([], [], None)
+            self._update_chart([], [], [], None)
             return
 
-        account_id = self.account_combo.currentData()
-        single_account = account_id is not None
+        selected_accounts = self._selected_accounts()
+        single_account = len(selected_accounts) == 1
+        self._split_mode_active = not single_account and self.split_check.isChecked()
         account = None
+        if not selected_accounts:
+            self.table.setRowCount(0)
+            self.warnings_label.setText("Select at least one account.")
+            self._update_chart([], [], [], None)
+            return
         if single_account:
-            account = self.session.get(Account, account_id)
+            account = selected_accounts[0]
             df = account_daily_forecast(self.session, account, range_start, range_end)
         else:
-            df = combined_daily_forecast(self.session, range_start, range_end)
+            df = combined_daily_forecast(self.session, range_start, range_end, accounts=selected_accounts)
 
         self.table.setRowCount(0)
         if df.height == 0:
             self.warnings_label.setText(
                 "No data for this range — the account's Balance As Of date is after the selected range."
             )
-            self._update_chart([], [], None)
+            self._update_chart([], [], [], None)
             return
 
         dates: list[dt.date] = []
@@ -266,10 +410,38 @@ class CashflowForecastScreen(QWidget):
         for col in range(5):
             self.table.resizeColumnToContents(col)
 
+        freq = self.freq_combo.currentData() or "Daily"
+        bucket_ranges = bucket_date_ranges(dates, freq)
+        chart_dates = [dates[end] for _, end in bucket_ranges]
+        chart_balances = [balances[end] for _, end in bucket_ranges]
+        rebase = self.rebase_check.isChecked()
         threshold = account.low_balance_threshold if single_account and account else None
-        self._update_chart(dates, balances, threshold)
 
-        warnings = low_balance_warnings(self.session, range_start, range_end)
+        if self._split_mode_active:
+            series_specs = []
+            for i, acc in enumerate(selected_accounts):
+                if acc.name not in df.columns:
+                    continue
+                col = df[acc.name].to_list()
+                base = col[0] if rebase else 0.0
+                points = [QPointF(_to_msecs(dates[end]), col[end] - base) for _, end in bucket_ranges]
+                series_specs.append((acc.name, points, ACCOUNT_COLORS[i % len(ACCOUNT_COLORS)]))
+        else:
+            if rebase:
+                base = balances[0]
+                chart_balances = [b - base for b in chart_balances]
+                if threshold is not None:
+                    threshold -= base
+            points = [QPointF(_to_msecs(d), b) for d, b in zip(chart_dates, chart_balances)]
+            series_specs = [("Balance", points, theme.ACCENT)]
+
+        self._table_dates = dates
+        self._bucket_row_ranges = bucket_ranges
+
+        self.chart.setTitle("Change Since Start" if rebase else "Balance")
+        self._update_chart(series_specs, chart_dates, chart_balances, threshold)
+
+        warnings = low_balance_warnings(self.session, range_start, range_end, accounts=selected_accounts)
         if warnings:
             shown = warnings[:8]
             lines = [

@@ -25,11 +25,18 @@ from app.models import (
     SuggestionStatus,
     SuggestionType,
     Transaction,
+    UpcomingExpense,
+    UpcomingExpenseStatus,
 )
 from app.seed import get_or_create_category
 from app.statements import find_recurring_transactions, normalize_description
 
 UNCATEGORIZED = "Uncategorized"
+
+# An upcoming expense's amount must match a statement transaction within
+# both this fraction and this absolute figure to count as the same event.
+AMOUNT_MATCH_TOLERANCE_PCT = 0.02
+AMOUNT_MATCH_TOLERANCE_ABS = 0.01
 
 # A recurring group's average amount must differ from the budgeted amount by
 # more than both this fraction and this absolute figure to be worth
@@ -70,6 +77,48 @@ def match_budget_item(
         if item_norm and (item_norm in norm or norm in item_norm):
             return item
     return None
+
+
+def match_upcoming_expense_transaction(statement: Statement, expense: UpcomingExpense) -> Transaction | None:
+    """The transaction in `statement` that best matches a scheduled one-off
+    expense — same sign, closest amount within tolerance. Amount-based (not
+    description-based, unlike match_budget_item) since a one-off's
+    description is often generic ("Car repair") and won't textually match
+    the real merchant line."""
+    expected = expense.amount if expense.flow_type == FlowType.INCOME else -expense.amount
+    tolerance = max(abs(expected) * AMOUNT_MATCH_TOLERANCE_PCT, AMOUNT_MATCH_TOLERANCE_ABS)
+    best, best_diff = None, None
+    for t in statement.transactions:
+        if (t.amount > 0) != (expected > 0):
+            continue
+        diff = abs(t.amount - expected)
+        if diff <= tolerance and (best is None or diff < best_diff):
+            best, best_diff = t, diff
+    return best
+
+
+def reconcile_upcoming_expenses(session: Session, account: Account, statement: Statement) -> None:
+    """For every still-Pending one-off expense scheduled within this
+    statement's period: auto-archive it if a matching transaction actually
+    came in, otherwise flag it Needs Review — the schedule said it should
+    have happened by now, and nothing in the real data matches, so a human
+    needs to decide whether to reschedule it or archive it."""
+    pending = (
+        session.query(UpcomingExpense)
+        .filter(UpcomingExpense.account_id == account.id)
+        .filter(UpcomingExpense.status == UpcomingExpenseStatus.PENDING)
+        .filter(UpcomingExpense.date >= statement.period_start)
+        .filter(UpcomingExpense.date <= statement.period_end)
+        .all()
+    )
+    for expense in pending:
+        match = match_upcoming_expense_transaction(statement, expense)
+        expense.last_seen_statement = statement
+        if match is not None:
+            expense.status = UpcomingExpenseStatus.ARCHIVED
+            expense.matched_transaction = match
+        else:
+            expense.status = UpcomingExpenseStatus.NEEDS_REVIEW
 
 
 def import_statement(
@@ -138,6 +187,7 @@ def import_statement(
 
     account.current_balance += net
     account.balance_as_of = period_end
+    reconcile_upcoming_expenses(session, account, statement)
     session.commit()
 
     generate_suggestions(session, account)

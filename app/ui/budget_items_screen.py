@@ -12,6 +12,7 @@ COLUMNS = [
     ("Account", lambda b: b.account.name),
     ("Amount", lambda b: f"£{b.amount:,.2f}", lambda b: b.amount),
     ("Type", lambda b: b.flow_type.value),
+    ("Target Account", lambda b: b.target_account.name if b.target_account else "—"),
     ("Frequency", lambda b: b.frequency.value),
     ("Effective From", lambda b: b.effective_from.strftime("%d %b %Y"), lambda b: b.effective_from),
     (

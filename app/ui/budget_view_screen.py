@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
 from sqlalchemy.orm import Session
 
 from app.forecast import monthly_budget_summary
+from app.models import Account
 from app.ui import theme
+from app.ui.widgets import AccountMultiSelect
 
 SECTION_BG = QColor(theme.SECTION_BG)
 TOTAL_BG = QColor(theme.TOTAL_BG)
@@ -55,6 +57,15 @@ class BudgetViewScreen(QWidget):
         self.as_of_edit.setCalendarPopup(True)
         self.as_of_edit.dateChanged.connect(self.refresh)
         controls.addWidget(self.as_of_edit)
+
+        controls.addWidget(QLabel("Exclude:"))
+        self.exclude_select = AccountMultiSelect(label_mode="exclude")
+        self.exclude_select.set_accounts(
+            session.query(Account).order_by(Account.name).all(), default_all_checked=False
+        )
+        self.exclude_select.selectionChanged.connect(self.refresh)
+        controls.addWidget(self.exclude_select)
+
         controls.addStretch()
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self.refresh)
@@ -168,17 +179,24 @@ class BudgetViewScreen(QWidget):
             label_item.setBackground(bg)
             amount_item.setBackground(bg)
 
+    def reload_accounts(self):
+        self.exclude_select.set_accounts(
+            self.session.query(Account).order_by(Account.name).all(), default_all_checked=False
+        )
+
     def refresh(self):
         as_of = dt.date(
             self.as_of_edit.date().year(), self.as_of_edit.date().month(), self.as_of_edit.date().day()
         )
-        summary = monthly_budget_summary(self.session, as_of)
+        summary = monthly_budget_summary(
+            self.session, as_of, exclude_account_ids=self.exclude_select.checked_ids()
+        )
 
         self.table.setRowCount(0)
         total_income = 0.0
         total_expense = 0.0
         expense_section = pl.DataFrame(schema=summary.schema)
-        for flow in ("Income", "Expense"):
+        for flow in ("Income", "Expense", "Transfer"):
             section = summary.filter(pl.col("flow_type") == flow)
             self._add_row(flow.upper(), bold=True, bg=SECTION_BG)
             subtotal = 0.0
@@ -190,12 +208,12 @@ class BudgetViewScreen(QWidget):
             self._add_row(f"Total {flow}", subtotal, bold=True, bg=TOTAL_BG)
             if flow == "Income":
                 total_income = subtotal
-            else:
+            elif flow == "Expense":
                 total_expense = subtotal
                 expense_section = section
 
         self._add_row("")
-        self._add_row("Net Remaining", total_income - total_expense, bold=True, bg=TOTAL_BG)
+        self._add_row("Net Remaining (excl. transfers)", total_income - total_expense, bold=True, bg=TOTAL_BG)
         self.table.resizeColumnToContents(0)
 
         self._update_expense_chart(expense_section, total_expense)

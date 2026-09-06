@@ -3,6 +3,7 @@ import datetime as dt
 
 from mcp.server.mcpserver import MCPServer
 
+from app import investment_sim, market_data
 from app.db import get_session, init_db
 from app.forecast import (
     account_daily_forecast,
@@ -17,11 +18,13 @@ from app.models import (
     Category,
     FlowType,
     Frequency,
+    Holding,
     Statement,
     SuggestionStatus,
     SuggestionType,
     Transaction,
     UpcomingExpense,
+    UpcomingExpenseStatus,
 )
 from app.seed import get_or_create_category, seed_defaults
 from app.statement_import import (
@@ -46,7 +49,10 @@ server = MCPServer(
         "recurring budget items, one-off upcoming expenses, budget suggestions, and "
         "cashflow forecasts). Money amounts on committed budget items and upcoming "
         "expenses are always positive; direction (income vs expense) is a separate field. "
-        "Imported transactions and statements keep their own signed `amount` (+ in / - out)."
+        "Imported transactions and statements keep their own signed `amount` (+ in / - out). "
+        "Any account can hold investment tickers+weights (set_holdings) — this drives both "
+        "the deterministic cashflow forecast and run_investment_simulation's historical-"
+        "bootstrap Monte Carlo."
     ),
 )
 
@@ -72,6 +78,13 @@ def _account_to_dict(a: Account) -> dict:
         "current_balance": a.current_balance,
         "balance_as_of": a.balance_as_of.isoformat(),
         "low_balance_threshold": a.low_balance_threshold,
+        "growth_rate": a.growth_rate,
+        "holdings": {h.ticker: h.weight for h in a.holdings},
+        "is_credit_card": a.is_credit_card,
+        "cc_payee_account": a.cc_payee_account.name if a.cc_payee_account else None,
+        "cc_payment_day": a.cc_payment_day,
+        "cc_pay_in_full": a.cc_pay_in_full,
+        "cc_fixed_payment_amount": a.cc_fixed_payment_amount,
     }
 
 
@@ -86,6 +99,7 @@ def _budget_item_to_dict(b: BudgetItem) -> dict:
         "effective_until": b.effective_until.isoformat() if b.effective_until else None,
         "category": b.category.name,
         "account": b.account.name,
+        "target_account": b.target_account.name if b.target_account else None,
         "notes": b.notes,
     }
 
@@ -96,8 +110,13 @@ def _upcoming_to_dict(u: UpcomingExpense) -> dict:
         "date": u.date.isoformat(),
         "description": u.description,
         "amount": u.amount,
+        "flow_type": u.flow_type.value,
         "category": u.category.name,
         "account": u.account.name,
+        "target_account": u.target_account.name if u.target_account else None,
+        "status": u.status.value,
+        "matched_transaction_id": u.matched_transaction_id,
+        "last_seen_statement_id": u.last_seen_statement_id,
     }
 
 
@@ -174,6 +193,13 @@ def _resolve_flow_type(value: str) -> FlowType:
         if ft.value.lower() == value.lower() or ft.name.lower() == value.lower():
             return ft
     raise ValueError(f"Unknown type '{value}'. Valid values: {[ft.value for ft in FlowType]}")
+
+
+def _resolve_upcoming_status(value: str) -> UpcomingExpenseStatus:
+    for s in UpcomingExpenseStatus:
+        if s.value.lower() == value.lower() or s.name.lower() == value.lower():
+            return s
+    raise ValueError(f"Unknown status '{value}'. Valid values: {[s.value for s in UpcomingExpenseStatus]}")
 
 
 # ---------------------------------------------------------------------------
@@ -459,17 +485,44 @@ def create_account(
     current_balance: float = 0.0,
     balance_as_of: str | None = None,
     low_balance_threshold: float | None = None,
+    growth_rate: float | None = None,
+    is_credit_card: bool = False,
+    cc_payee_account: str | None = None,
+    cc_payment_day: int | None = None,
+    cc_pay_in_full: bool = False,
+    cc_fixed_payment_amount: float | None = None,
 ) -> dict:
-    """Create a new account. balance_as_of is an ISO date string (e.g. '2026-08-02'), defaults to today."""
+    """Create a new account. balance_as_of is an ISO date string (e.g. '2026-08-02'), defaults to today.
+
+    growth_rate is an annual percentage (e.g. 4.5 for 4.5% APY), compounded
+    monthly in the cashflow forecast for this account.
+
+    is_credit_card=True enables autopay projection: on cc_payment_day each
+    month (1-31, clamped to shorter months), a direct debit is projected
+    from cc_payee_account (must already exist) into this account — either
+    the full outstanding balance (cc_pay_in_full=True) or a fixed
+    cc_fixed_payment_amount. current_balance follows the usual sign
+    convention (negative = money owed).
+    """
     session = get_session()
     try:
         if session.query(Account).filter_by(name=name).one_or_none() is not None:
             raise ValueError(f"An account named '{name}' already exists.")
+        if is_credit_card and not cc_payee_account:
+            raise ValueError("is_credit_card=True requires cc_payee_account.")
         account = Account(
             name=name,
             current_balance=current_balance,
             balance_as_of=_parse_date(balance_as_of) or dt.date.today(),
             low_balance_threshold=low_balance_threshold,
+            growth_rate=growth_rate,
+            is_credit_card=is_credit_card,
+            cc_payee_account=_resolve_account(session, cc_payee_account) if cc_payee_account else None,
+            cc_payment_day=cc_payment_day if is_credit_card else None,
+            cc_pay_in_full=cc_pay_in_full if is_credit_card else False,
+            cc_fixed_payment_amount=cc_fixed_payment_amount
+            if is_credit_card and not cc_pay_in_full
+            else None,
         )
         session.add(account)
         session.commit()
@@ -486,8 +539,23 @@ def update_account(
     balance_as_of: str | None = None,
     low_balance_threshold: float | None = None,
     clear_threshold: bool = False,
+    growth_rate: float | None = None,
+    clear_growth_rate: bool = False,
+    is_credit_card: bool | None = None,
+    cc_payee_account: str | None = None,
+    clear_cc_payee_account: bool = False,
+    cc_payment_day: int | None = None,
+    cc_pay_in_full: bool | None = None,
+    cc_fixed_payment_amount: float | None = None,
+    clear_cc_fixed_payment_amount: bool = False,
 ) -> dict:
-    """Update an account. Only pass the fields you want to change; set clear_threshold=True to remove a warning threshold."""
+    """Update an account. Only pass the fields you want to change; set clear_threshold=True to remove a
+    warning threshold, clear_growth_rate=True to remove a growth rate.
+
+    Credit card autopay fields (cc_payee_account, cc_payment_day,
+    cc_pay_in_full, cc_fixed_payment_amount) only take effect once
+    is_credit_card is (or was already) True.
+    """
     session = get_session()
     try:
         account = session.get(Account, account_id)
@@ -503,6 +571,26 @@ def update_account(
             account.low_balance_threshold = None
         elif low_balance_threshold is not None:
             account.low_balance_threshold = low_balance_threshold
+        if clear_growth_rate:
+            account.growth_rate = None
+        elif growth_rate is not None:
+            account.growth_rate = growth_rate
+        if is_credit_card is not None:
+            account.is_credit_card = is_credit_card
+        if clear_cc_payee_account:
+            account.cc_payee_account = None
+        elif cc_payee_account is not None:
+            account.cc_payee_account = _resolve_account(session, cc_payee_account)
+        if cc_payment_day is not None:
+            account.cc_payment_day = cc_payment_day
+        if cc_pay_in_full is not None:
+            account.cc_pay_in_full = cc_pay_in_full
+        if clear_cc_fixed_payment_amount:
+            account.cc_fixed_payment_amount = None
+        elif cc_fixed_payment_amount is not None:
+            account.cc_fixed_payment_amount = cc_fixed_payment_amount
+        if account.is_credit_card and account.cc_payee_account_id == account.id:
+            raise ValueError("A credit card can't pay itself — choose a different cc_payee_account.")
         session.commit()
         return _account_to_dict(account)
     finally:
@@ -519,15 +607,212 @@ def delete_account(account_id: int) -> dict:
             raise ValueError(f"No account with id {account_id}")
         used_budget = session.query(BudgetItem).filter_by(account_id=account_id).count()
         used_upcoming = session.query(UpcomingExpense).filter_by(account_id=account_id).count()
-        if used_budget or used_upcoming:
+        used_as_target = (
+            session.query(BudgetItem).filter_by(target_account_id=account_id).count()
+            + session.query(UpcomingExpense).filter_by(target_account_id=account_id).count()
+        )
+        used_as_cc_payee = session.query(Account).filter_by(cc_payee_account_id=account_id).count()
+        if used_budget or used_upcoming or used_as_target or used_as_cc_payee:
             raise ValueError(
-                f"Can't delete '{account.name}' — used by {used_budget} budget item(s) and "
-                f"{used_upcoming} upcoming expense(s). Reassign or delete those first."
+                f"Can't delete '{account.name}' — used by {used_budget} budget item(s), "
+                f"{used_upcoming} upcoming expense(s), {used_as_target} transfer(s) targeting it, and "
+                f"{used_as_cc_payee} credit card(s) that pay from it. Reassign or delete those first."
             )
         name = account.name
         session.delete(account)
         session.commit()
         return {"deleted": name}
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# investment accounts: holdings + historical-bootstrap Monte Carlo simulation
+# ---------------------------------------------------------------------------
+
+
+@server.tool()
+def list_holdings(account: str) -> dict[str, float]:
+    """{ticker: weight} for an account's investment holdings (empty dict if it's not an
+    investment account)."""
+    session = get_session()
+    try:
+        acc = _resolve_account(session, account)
+        return {h.ticker: h.weight for h in acc.holdings}
+    finally:
+        session.close()
+
+
+@server.tool()
+def set_holdings(account: str, weights: dict[str, float]) -> dict:
+    """Replace an account's investment holdings with `weights` ({ticker: relative weight} —
+    needn't sum to 1, they're renormalised). Pass an empty dict to clear holdings (making it a
+    plain account again). Having any holdings is what makes an account an "investment account":
+    it drives both the deterministic cashflow forecast's growth (mean historical monthly return
+    of the portfolio) and run_investment_simulation.
+    """
+    session = get_session()
+    try:
+        acc = _resolve_account(session, account)
+        acc.holdings.clear()  # cascade="all, delete-orphan" — also updates the in-memory collection
+        for ticker, weight in weights.items():
+            session.add(Holding(account=acc, ticker=ticker.upper(), weight=weight))
+        session.commit()
+        return _account_to_dict(acc)
+    finally:
+        session.close()
+
+
+@server.tool()
+def run_investment_simulation(
+    account: str,
+    as_of: str | None = None,
+    lookback_years: int = 10,
+    horizon_years: int = 20,
+    monthly_contribution: float = 0.0,
+    n_paths: int = 1000,
+    return_shift_grid: list[float] | None = None,
+    vol_scale_grid: list[float] | None = None,
+    contribution_grid: list[float] | None = None,
+    horizon_grid_years: list[int] | None = None,
+    seed: int | None = None,
+) -> dict:
+    """Historical-bootstrap Monte Carlo simulation for an investment account (one with holdings
+    set via set_holdings). Resamples the portfolio's actual historical monthly returns (fetched
+    from Yahoo Finance) rather than assuming a parametric distribution.
+
+    Always returns, for the base case (no return/vol adjustment):
+      - percentile_bands: 5/25/50/75/95th percentile ending-value trajectories, monthly, over horizon_years
+      - drawdown_stats: distribution of each simulated path's own worst peak-to-trough decline
+        (worst/best/mean and 5/25/50/75/95th percentiles, as negative fractions) — how bad the ride
+        could get, separate from where you end up. Computed on the raw balance, so a steady
+        monthly_contribution partially masks the underlying market decline.
+
+    Optionally also runs one or both parameter grids (each cell reports median_ending_balance and
+    median_max_drawdown at horizon_years):
+      - return_shift_grid × vol_scale_grid: "what if returns/volatility were different from
+        history?" (e.g. return_shift_grid=[-0.02,0,0.02], vol_scale_grid=[0.5,1.0,1.5])
+      - contribution_grid × horizon_grid_years: "how much do I need to save, for how long?"
+    """
+    session = get_session()
+    try:
+        acc = _resolve_account(session, account)
+        weights = {h.ticker: h.weight for h in acc.holdings}
+        if not weights:
+            raise ValueError(f"'{acc.name}' has no holdings. Set some first with set_holdings.")
+        as_of_date = _parse_date(as_of) or dt.date.today()
+        returns = market_data.fetch_portfolio_monthly_returns(weights, as_of_date, lookback_years)
+        if not returns:
+            raise ValueError(
+                "Couldn't fetch historical price data for this portfolio (bad ticker or no network)."
+            )
+
+        n_periods = horizon_years * 12
+        paths = investment_sim.bootstrap_paths(
+            returns,
+            acc.current_balance,
+            n_periods,
+            n_paths=n_paths,
+            monthly_contribution=monthly_contribution,
+            seed=seed,
+        )
+        result = {
+            "account": acc.name,
+            "as_of": as_of_date.isoformat(),
+            "lookback_years": lookback_years,
+            "horizon_years": horizon_years,
+            "historical_monthly_returns_used": len(returns),
+            "mean_historical_monthly_return": sum(returns) / len(returns),
+            "percentile_bands": investment_sim.percentile_bands(paths),
+            "drawdown_stats": investment_sim.drawdown_stats(paths),
+        }
+
+        if return_shift_grid and vol_scale_grid:
+            grid = investment_sim.return_vol_grid(
+                returns,
+                acc.current_balance,
+                n_periods,
+                return_shift_grid,
+                vol_scale_grid,
+                monthly_contribution=monthly_contribution,
+                seed=seed,
+            )
+            result["return_vol_grid"] = [
+                {"return_shift": rs, "vol_scale": vs, **stats} for (rs, vs), stats in grid.items()
+            ]
+
+        if contribution_grid and horizon_grid_years:
+            grid = investment_sim.contribution_horizon_grid(
+                returns, acc.current_balance, contribution_grid, horizon_grid_years, seed=seed
+            )
+            result["contribution_horizon_grid"] = [
+                {"monthly_contribution": c, "horizon_years": y, **stats} for (c, y), stats in grid.items()
+            ]
+
+        return result
+    finally:
+        session.close()
+
+
+@server.tool()
+def run_realised_historical_scenarios(
+    account: str,
+    as_of: str | None = None,
+    lookback_years: int = 20,
+    horizon_years: int = 10,
+    monthly_contribution: float = 0.0,
+    include_trajectories: bool = False,
+) -> dict:
+    """Every real, non-random horizon_years-long historical window for an investment account's
+    portfolio (one with holdings set via set_holdings), replayed in actual chronological order —
+    "if you'd started investing on date X, here's what would really have happened" — for every X
+    the available history allows. Unlike run_investment_simulation, nothing is resampled or
+    shuffled: each scenario is a real sequence of returns that occurred.
+
+    lookback_years controls how much history is fetched (and therefore how many overlapping
+    horizon_years-long windows/scenarios can be formed — needs at least horizon_years of data,
+    more gives more scenarios). Set include_trajectories=True to get each scenario's full
+    month-by-month balance path, not just its ending balance and max_drawdown (each scenario's own
+    worst peak-to-trough decline, as a negative fraction — also summarised across all scenarios via
+    worst/median/best_max_drawdown, alongside the equivalent ending-balance stats).
+    """
+    session = get_session()
+    try:
+        acc = _resolve_account(session, account)
+        weights = {h.ticker: h.weight for h in acc.holdings}
+        if not weights:
+            raise ValueError(f"'{acc.name}' has no holdings. Set some first with set_holdings.")
+        as_of_date = _parse_date(as_of) or dt.date.today()
+        series = market_data.fetch_portfolio_monthly_return_series(weights, as_of_date, lookback_years)
+        n_periods = horizon_years * 12
+        if len(series) < n_periods:
+            raise ValueError(
+                f"Only {len(series)} months of history available, need at least {n_periods} "
+                f"({horizon_years} years) — increase lookback_years or reduce horizon_years."
+            )
+
+        scenarios = investment_sim.realised_historical_scenarios(
+            series, acc.current_balance, n_periods, monthly_contribution
+        )
+        endings = sorted(s["ending_balance"] for s in scenarios)
+        drawdowns = sorted(s["max_drawdown"] for s in scenarios)
+        if not include_trajectories:
+            for s in scenarios:
+                del s["trajectory"]
+
+        return {
+            "account": acc.name,
+            "as_of": as_of_date.isoformat(),
+            "horizon_years": horizon_years,
+            "scenario_count": len(scenarios),
+            "worst_ending_balance": endings[0],
+            "median_ending_balance": endings[len(endings) // 2],
+            "best_ending_balance": endings[-1],
+            "worst_max_drawdown": drawdowns[0],
+            "median_max_drawdown": drawdowns[len(drawdowns) // 2],
+            "best_max_drawdown": drawdowns[-1],
+            "scenarios": scenarios,
+        }
     finally:
         session.close()
 
@@ -581,29 +866,40 @@ def create_budget_item(
     effective_from: str | None = None,
     effective_until: str | None = None,
     notes: str | None = None,
+    target_account: str | None = None,
 ) -> dict:
     """Add a committed recurring payment.
 
-    flow_type: 'Income' or 'Expense'. frequency: Weekly, Fortnightly,
-    4-Weekly, Monthly, Quarterly, 6-Monthly, or Annually. effective_from
-    (ISO date, defaults to today) anchors the recurrence — e.g. for Monthly
-    its day-of-month is the day the payment recurs on. Category is created
-    automatically if it doesn't exist; account must already exist (see
-    list_accounts / create_account).
+    flow_type: 'Income', 'Expense', or 'Transfer'. frequency: Weekly,
+    Fortnightly, 4-Weekly, Monthly, Quarterly, 6-Monthly, or Annually.
+    effective_from (ISO date, defaults to today) anchors the recurrence —
+    e.g. for Monthly its day-of-month is the day the payment recurs on.
+    Category is created automatically if it doesn't exist; account must
+    already exist (see list_accounts / create_account).
+
+    flow_type='Transfer' requires target_account (any other existing
+    account) — the amount is projected as an outflow from `account` and an
+    inflow to `target_account` on the same schedule. Use this for any
+    recurring cross-account movement (e.g. into a savings account, which can
+    separately be given its own growth_rate via create_account/update_account).
     """
     session = get_session()
     try:
         acc = _resolve_account(session, account)
+        resolved_flow_type = _resolve_flow_type(flow_type)
+        if resolved_flow_type == FlowType.TRANSFER and not target_account:
+            raise ValueError("flow_type='Transfer' requires target_account.")
         item = BudgetItem(
             description=description,
             amount=amount,
-            flow_type=_resolve_flow_type(flow_type),
+            flow_type=resolved_flow_type,
             frequency=_resolve_frequency(frequency),
             effective_from=_parse_date(effective_from) or dt.date.today(),
             effective_until=_parse_date(effective_until),
             notes=notes,
             category=get_or_create_category(session, category),
             account=acc,
+            target_account=_resolve_account(session, target_account) if target_account else None,
         )
         session.add(item)
         session.commit()
@@ -625,6 +921,8 @@ def update_budget_item(
     effective_until: str | None = None,
     clear_effective_until: bool = False,
     notes: str | None = None,
+    target_account: str | None = None,
+    clear_target_account: bool = False,
 ) -> dict:
     """Update a budget item. Only pass the fields you want to change."""
     session = get_session()
@@ -650,8 +948,14 @@ def update_budget_item(
             item.effective_until = None
         elif effective_until is not None:
             item.effective_until = _parse_date(effective_until)
+        if clear_target_account:
+            item.target_account = None
+        elif target_account is not None:
+            item.target_account = _resolve_account(session, target_account)
         if notes is not None:
             item.notes = notes
+        if item.flow_type == FlowType.TRANSFER and item.target_account is None:
+            raise ValueError("flow_type='Transfer' requires a target_account.")
         session.commit()
         return _budget_item_to_dict(item)
     finally:
@@ -680,8 +984,15 @@ def delete_budget_item(item_id: int) -> dict:
 
 
 @server.tool()
-def list_upcoming_expenses(start_date: str | None = None, end_date: str | None = None) -> list[dict]:
-    """List one-off upcoming expenses, optionally filtered to a date range (ISO dates)."""
+def list_upcoming_expenses(
+    start_date: str | None = None, end_date: str | None = None, status: str | None = None
+) -> list[dict]:
+    """List one-off upcoming expenses, optionally filtered to a date range (ISO dates) and/or
+    status ('Pending', 'Archived', or 'Needs Review' — omit for all).
+
+    Needs Review means a statement covering this expense's date was imported but nothing in it
+    matched — use reschedule_upcoming_expense or archive_upcoming_expense to resolve it.
+    """
     session = get_session()
     try:
         query = session.query(UpcomingExpense)
@@ -689,26 +1000,47 @@ def list_upcoming_expenses(start_date: str | None = None, end_date: str | None =
             query = query.filter(UpcomingExpense.date >= _parse_date(start_date))
         if end_date:
             query = query.filter(UpcomingExpense.date <= _parse_date(end_date))
+        if status:
+            query = query.filter(UpcomingExpense.status == _resolve_upcoming_status(status))
         return [_upcoming_to_dict(u) for u in query.order_by(UpcomingExpense.date).all()]
     finally:
         session.close()
 
 
 @server.tool()
-def create_upcoming_expense(date: str, description: str, amount: float, category: str, account: str) -> dict:
-    """Add a one-off dated expense (ISO date string).
+def create_upcoming_expense(
+    date: str,
+    description: str,
+    amount: float,
+    category: str,
+    account: str,
+    flow_type: str = "Expense",
+    target_account: str | None = None,
+) -> dict:
+    """Add a one-off dated item (ISO date string).
 
-    Category is created automatically if new; account must already exist.
+    flow_type: 'Income', 'Expense', or 'Transfer' (defaults to Expense). amount
+    is always positive; flow_type carries the direction. Category is created
+    automatically if new; account must already exist.
+
+    flow_type='Transfer' requires target_account (any other existing
+    account) — the amount is projected as an outflow from `account` and an
+    inflow to `target_account` on this date.
     """
     session = get_session()
     try:
         acc = _resolve_account(session, account)
+        resolved_flow_type = _resolve_flow_type(flow_type)
+        if resolved_flow_type == FlowType.TRANSFER and not target_account:
+            raise ValueError("flow_type='Transfer' requires target_account.")
         expense = UpcomingExpense(
             date=_parse_date(date),
             description=description,
             amount=amount,
+            flow_type=resolved_flow_type,
             category=get_or_create_category(session, category),
             account=acc,
+            target_account=_resolve_account(session, target_account) if target_account else None,
         )
         session.add(expense)
         session.commit()
@@ -725,8 +1057,16 @@ def update_upcoming_expense(
     amount: float | None = None,
     category: str | None = None,
     account: str | None = None,
+    flow_type: str | None = None,
+    target_account: str | None = None,
+    clear_target_account: bool = False,
 ) -> dict:
-    """Update a one-off upcoming expense. Only pass the fields you want to change."""
+    """Update a one-off upcoming expense. Only pass the fields you want to change.
+
+    Changing `date` on a Needs Review item resets it to Pending (editing it counts as
+    reschedule-and-reconsider) — use reschedule_upcoming_expense for that explicitly, or
+    archive_upcoming_expense if it should just be dropped instead.
+    """
     session = get_session()
     try:
         expense = session.get(UpcomingExpense, item_id)
@@ -734,6 +1074,10 @@ def update_upcoming_expense(
             raise ValueError(f"No upcoming expense with id {item_id}")
         if date is not None:
             expense.date = _parse_date(date)
+            if expense.status == UpcomingExpenseStatus.NEEDS_REVIEW:
+                expense.status = UpcomingExpenseStatus.PENDING
+                expense.matched_transaction = None
+                expense.last_seen_statement = None
         if description is not None:
             expense.description = description
         if amount is not None:
@@ -742,6 +1086,50 @@ def update_upcoming_expense(
             expense.category = get_or_create_category(session, category)
         if account is not None:
             expense.account = _resolve_account(session, account)
+        if flow_type is not None:
+            expense.flow_type = _resolve_flow_type(flow_type)
+        if clear_target_account:
+            expense.target_account = None
+        elif target_account is not None:
+            expense.target_account = _resolve_account(session, target_account)
+        if expense.flow_type == FlowType.TRANSFER and expense.target_account is None:
+            raise ValueError("flow_type='Transfer' requires a target_account.")
+        session.commit()
+        return _upcoming_to_dict(expense)
+    finally:
+        session.close()
+
+
+@server.tool()
+def reschedule_upcoming_expense(item_id: int, new_date: str) -> dict:
+    """Move a one-off expense to a new date and reset it to Pending. Use on a Needs Review item
+    (scheduled but not matched by any imported statement) that actually happened later, or
+    hasn't happened yet."""
+    session = get_session()
+    try:
+        expense = session.get(UpcomingExpense, item_id)
+        if expense is None:
+            raise ValueError(f"No upcoming expense with id {item_id}")
+        expense.date = _parse_date(new_date)
+        expense.status = UpcomingExpenseStatus.PENDING
+        expense.matched_transaction = None
+        expense.last_seen_statement = None
+        session.commit()
+        return _upcoming_to_dict(expense)
+    finally:
+        session.close()
+
+
+@server.tool()
+def archive_upcoming_expense(item_id: int) -> dict:
+    """Mark a one-off expense Archived by hand. Use on a Needs Review item that just isn't
+    happening — no need to reschedule it."""
+    session = get_session()
+    try:
+        expense = session.get(UpcomingExpense, item_id)
+        if expense is None:
+            raise ValueError(f"No upcoming expense with id {item_id}")
+        expense.status = UpcomingExpenseStatus.ARCHIVED
         session.commit()
         return _upcoming_to_dict(expense)
     finally:

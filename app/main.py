@@ -19,6 +19,8 @@ from app.ui.accounts_screen import AccountsScreen
 from app.ui.budget_items_screen import BudgetItemsScreen
 from app.ui.budget_view_screen import BudgetViewScreen
 from app.ui.cashflow_screen import CashflowForecastScreen
+from app.ui.dashboard_screen import DashboardScreen
+from app.ui.investment_sim_screen import InvestmentSimScreen
 from app.ui.statements_screen import StatementsScreen
 from app.ui.upcoming_expenses_screen import UpcomingExpensesScreen
 
@@ -71,39 +73,53 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(self.tabs)
         self.setCentralWidget(central)
 
+        self.dashboard_screen = DashboardScreen(self.session)
         self.accounts_screen = AccountsScreen(self.session, on_change=self.on_data_changed)
         self.budget_items_screen = BudgetItemsScreen(self.session, on_change=self.on_data_changed)
         self.upcoming_screen = UpcomingExpensesScreen(self.session, on_change=self.on_data_changed)
         self.statements_screen = StatementsScreen(self.session, on_change=self.on_data_changed)
         self.budget_view_screen = BudgetViewScreen(self.session)
         self.cashflow_screen = CashflowForecastScreen(self.session)
+        self.investment_sim_screen = InvestmentSimScreen(self.session)
 
+        self.tabs.addTab(self.dashboard_screen, "Dashboard")
         self.tabs.addTab(self.accounts_screen, "Accounts")
         self.tabs.addTab(self.budget_items_screen, "Budget Items")
         self.tabs.addTab(self.upcoming_screen, "Upcoming Expenses")
         self.tabs.addTab(self.statements_screen, "Statements")
         self.tabs.addTab(self.budget_view_screen, "Budget")
         self.tabs.addTab(self.cashflow_screen, "Cash Flow Forecast")
+        self.tabs.addTab(self.investment_sim_screen, "Investment Simulation")
 
         self.tabs.currentChanged.connect(self.on_tab_changed)
 
     def on_data_changed(self):
+        self.dashboard_screen.reload_accounts()
+        self.dashboard_screen.refresh()
         self.statements_screen.reload_accounts()
         self.statements_screen.refresh()
+        self.budget_view_screen.reload_accounts()
         self.budget_view_screen.refresh()
         self.cashflow_screen.reload_accounts()
         self.cashflow_screen.refresh()
+        self.investment_sim_screen.reload_accounts()
 
     def on_tab_changed(self, index: int):
         widget = self.tabs.widget(index)
-        if widget is self.statements_screen:
+        if widget is self.dashboard_screen:
+            self.dashboard_screen.reload_accounts()
+            self.dashboard_screen.refresh()
+        elif widget is self.statements_screen:
             self.statements_screen.reload_accounts()
             self.statements_screen.refresh()
         elif widget is self.budget_view_screen:
+            self.budget_view_screen.reload_accounts()
             self.budget_view_screen.refresh()
         elif widget is self.cashflow_screen:
             self.cashflow_screen.reload_accounts()
             self.cashflow_screen.refresh()
+        elif widget is self.investment_sim_screen:
+            self.investment_sim_screen.reload_accounts()
 
     def closeEvent(self, event):
         self.session.close()
