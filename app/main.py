@@ -86,12 +86,12 @@ class MainWindow(QMainWindow):
 
         self.tabs.addTab(self.dashboard_screen, "Dashboard")
         self.tabs.addTab(self.accounts_screen, "Accounts")
+        self.tabs.addTab(self.cashflow_screen, "Cash Flow Forecast")
         self.tabs.addTab(self.budget_items_screen, "Budget Items")
         self.tabs.addTab(self.upcoming_screen, "Upcoming Expenses")
         self.tabs.addTab(self.statements_screen, "Statements")
         self.tabs.addTab(self.transactions_screen, "Transactions")
         self.tabs.addTab(self.budget_view_screen, "Budget")
-        self.tabs.addTab(self.cashflow_screen, "Cash Flow Forecast")
         self.tabs.addTab(self.investment_sim_screen, "Investment Simulation")
 
         self.tabs.currentChanged.connect(self.on_tab_changed)

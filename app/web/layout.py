@@ -21,12 +21,12 @@ SUCCESS = "#34D399"
 NAV_ITEMS = [
     ("/", "Dashboard"),
     ("/accounts", "Accounts"),
+    ("/cashflow", "Cash Flow Forecast"),
     ("/budget-items", "Budget Items"),
     ("/upcoming-expenses", "Upcoming Expenses"),
     ("/statements", "Statements"),
     ("/transactions", "Transactions"),
     ("/budget", "Budget"),
-    ("/cashflow", "Cash Flow Forecast"),
     ("/investment-sim", "Investment Simulation"),
 ]
 
