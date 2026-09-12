@@ -316,20 +316,44 @@ class StatementsScreen(QWidget):
             if account is None:
                 QMessageBox.warning(self, "No account", "Choose an account first.")
                 return
+            period_start = _to_pydate(start_edit.date())
+            period_end = _to_pydate(end_edit.date())
+            is_reimport = (
+                self.session.query(Statement)
+                .filter_by(account_id=account.id, period_start=period_start, period_end=period_end)
+                .first()
+                is not None
+            )
+            balance_before = account.current_balance
             try:
                 import_statement(
                     self.session,
                     account,
                     parsed["transactions"],
-                    _to_pydate(start_edit.date()),
-                    _to_pydate(end_edit.date()),
+                    period_start,
+                    period_end,
                     source_note=filename,
+                    closing_balance=parsed.get("closing_balance"),
                 )
             except ValueError as exc:
                 QMessageBox.warning(self, "Couldn't import statement", str(exc))
                 return
             discard()
             self._notify_change()
+            verb = "Updated" if is_reimport else "Imported"
+            if account.current_balance == balance_before:
+                QMessageBox.information(
+                    self,
+                    f"{verb} as historical",
+                    f"{verb} {filename}. Balance was already known as of "
+                    f"{account.balance_as_of.strftime('%d %b %Y')}, so it wasn't changed.",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    f"{verb}",
+                    f"{verb} {filename}. Balance now £{account.current_balance:,.2f}.",
+                )
 
         discard_btn.clicked.connect(discard)
         import_btn.clicked.connect(do_import)

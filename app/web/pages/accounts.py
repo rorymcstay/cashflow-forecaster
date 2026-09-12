@@ -2,13 +2,23 @@ import datetime as dt
 
 from nicegui import ui
 
-from app.forecast import account_run_rate
+from app.forecast import account_daily_forecast, account_run_rate
 from app.models import Account, BudgetItem, Holding, UpcomingExpense
 from app.web.layout import SUCCESS, TEXT_MUTED, WARNING, get_page_session, page_shell
+
+FORECAST_DAYS = 30
 
 
 def _money(value: float) -> str:
     return f"£{value:,.2f}"
+
+
+def _forecast_balance(session, account: Account, days: int = FORECAST_DAYS) -> float:
+    today = dt.date.today()
+    df = account_daily_forecast(session, account, today, today + dt.timedelta(days=days))
+    if df.height == 0:
+        return account.current_balance
+    return float(df["balance"][-1])
 
 
 def _cc_autopay_label(account: Account) -> str:
@@ -63,18 +73,22 @@ def accounts_page():
                     ui.label("Balance").style("width: 110px;")
                     ui.label("As Of").style("width: 100px;")
                     ui.label("Net Monthly Flow").style("width: 130px;")
+                    ui.label(f"{FORECAST_DAYS}-Day Forecast").style("width: 130px;")
                     ui.label("Growth / Autopay").style("flex: 1;")
                     ui.label("Holdings").style("width: 140px;")
                     ui.label("").style("width: 110px;")
 
                 for account in accounts:
                     net = account_run_rate(session, account)["avg_monthly_net"]
+                    forecast_balance = _forecast_balance(session, account)
                     with ui.row().classes("w-full items-center gap-2"):
                         ui.label(account.name).style("width: 160px;")
                         ui.label(_money(account.current_balance)).style("width: 110px;")
                         ui.label(account.balance_as_of.strftime("%d %b %Y")).style("width: 100px;")
                         flow_color = SUCCESS if net >= 0 else WARNING
                         ui.label(f"{_money(net)}/mo").style(f"width: 130px; color: {flow_color};")
+                        forecast_color = SUCCESS if forecast_balance >= 0 else WARNING
+                        ui.label(_money(forecast_balance)).style(f"width: 130px; color: {forecast_color};")
                         detail = (
                             _cc_autopay_label(account)
                             if account.is_credit_card

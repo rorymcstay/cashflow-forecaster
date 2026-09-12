@@ -122,6 +122,29 @@ def reconcile_upcoming_expenses(session: Session, account: Account, statement: S
             expense.status = UpcomingExpenseStatus.NEEDS_REVIEW
 
 
+def _transaction_date(t: dict) -> dt.date:
+    raw_date = t["date"]
+    return raw_date if isinstance(raw_date, dt.date) else dt.date.fromisoformat(raw_date)
+
+
+def _clear_matched_upcoming_expenses(session: Session, statement: Statement) -> None:
+    """Before replacing a statement's transactions (re-import), un-match any
+    upcoming expense pointing at one of them — otherwise it's left archived
+    against a row we're about to delete, instead of being re-matched against
+    the fresh transactions by reconcile_upcoming_expenses."""
+    transaction_ids = [t.id for t in statement.transactions]
+    if not transaction_ids:
+        return
+    expenses = (
+        session.query(UpcomingExpense)
+        .filter(UpcomingExpense.matched_transaction_id.in_(transaction_ids))
+        .all()
+    )
+    for expense in expenses:
+        expense.matched_transaction = None
+        expense.status = UpcomingExpenseStatus.PENDING
+
+
 def import_statement(
     session: Session,
     account: Account,
@@ -129,48 +152,106 @@ def import_statement(
     period_start: dt.date,
     period_end: dt.date,
     source_note: str | None = None,
+    closing_balance: float | None = None,
 ) -> Statement:
-    """Classify and persist a billing period's transactions, update the
-    account balance, and refresh this account's budget suggestions.
+    """Classify and persist a billing period's transactions. Re-importing an
+    already-imported period (same account + period_start + period_end)
+    upserts: its old transactions are replaced with the freshly parsed ones,
+    rather than rejecting as a duplicate — this is the supported way to
+    correct a statement whose balance came out wrong (drop the same file in
+    again).
 
-    Statements must be imported in chronological order per account: the
-    account's `current_balance` is incremented by the net of the imported
-    transactions and `balance_as_of` is advanced to `period_end`, so a
-    statement whose period starts before the account's current
-    `balance_as_of` would double-count history that's already reflected in
-    the balance.
+    `balance_as_of` marks the date the account's `current_balance` is known
+    accurate through (inclusive). Importing a statement compares its period
+    against that date:
+
+    - period_end <= balance_as_of, and this isn't the statement that
+      currently defines balance_as_of: entirely historical — the balance
+      already reflects this period (and beyond), so it's saved purely as
+      transaction history and current_balance is left untouched. This is
+      what makes out-of-order/backfill imports safe: import statements in
+      any order, and only the one that actually defines the current balance
+      moves it.
+    - This statement IS the one that currently defines balance_as_of
+      (period_end == balance_as_of and it's a re-import): always allowed,
+      since re-importing the current statement is exactly how you correct
+      its effect on the balance. If `closing_balance` is given (from a PDF's
+      own summary line), current_balance is *set* to it directly — the most
+      reliable fix, since it can't inherit any prior drift. Otherwise
+      current_balance is adjusted by (new net − old net).
+    - Otherwise the statement extends the known balance forward:
+      current_balance is set to `closing_balance` if given, else incremented
+      by the net of its transactions, and balance_as_of advances to
+      period_end. (A gap between the old balance_as_of and this
+      period_start is allowed — the Missing Statements panel is what
+      surfaces that gap for backfilling — but the days inside the gap won't
+      be reflected in the balance until a statement covering them is
+      imported.)
+    - A period that starts before balance_as_of but ends after it (and
+      isn't the statement that set balance_as_of) straddles it. Rather than
+      rejecting this outright, it's treated as a rolling re-export (the
+      normal shape of e.g. a Monzo "last 3 months" CSV, which will always
+      overlap whatever's already imported): transactions on or before
+      balance_as_of are dropped as already-known, and only the genuinely new
+      tail (after balance_as_of) is saved and applied to the balance. The
+      dropped portion is assumed to already be correctly recorded from a
+      prior import — this doesn't reconcile or merge it, just avoids
+      double-counting it.
     """
     existing = (
         session.query(Statement)
         .filter_by(account_id=account.id, period_start=period_start, period_end=period_end)
         .one_or_none()
     )
-    if existing is not None:
-        raise ValueError(
-            f"A statement for '{account.name}' covering {period_start.isoformat()} to "
-            f"{period_end.isoformat()} has already been imported (statement #{existing.id})."
+    is_front_statement = existing is not None and account.balance_as_of == period_end
+    is_historical = period_end <= account.balance_as_of and not is_front_statement
+    straddles = not is_historical and not is_front_statement and period_start < account.balance_as_of
+
+    if straddles:
+        cutoff = account.balance_as_of
+        transactions = [t for t in transactions if _transaction_date(t) > cutoff]
+        if not transactions:
+            raise ValueError(
+                f"Every transaction in this file is on or before '{account.name}'s known balance date "
+                f"({cutoff.isoformat()}) — nothing new to import."
+            )
+        period_start = cutoff + dt.timedelta(days=1)
+        existing = (
+            session.query(Statement)
+            .filter_by(account_id=account.id, period_start=period_start, period_end=period_end)
+            .one_or_none()
         )
-    if period_start < account.balance_as_of:
-        raise ValueError(
-            f"'{account.name}' balance is already known as of {account.balance_as_of.isoformat()}, "
-            f"which is after this statement's start ({period_start.isoformat()}). Statements must be "
-            "imported in chronological order per account, oldest first, so the balance update doesn't "
-            "double-count. Import earlier statements first, or use update_account to correct the "
-            "balance-as-of date if this is a deliberate backfill."
-        )
+        is_front_statement = existing is not None and account.balance_as_of == period_end
+        is_historical = False  # every remaining transaction is after balance_as_of by construction
 
     classified = classify_transactions(transactions)
 
-    statement = Statement(
-        account=account, period_start=period_start, period_end=period_end, source_note=source_note
-    )
-    session.add(statement)
-    session.flush()
+    old_net = 0.0
+    if existing is not None:
+        old_net = sum(t.amount for t in existing.transactions)
+        _clear_matched_upcoming_expenses(session, existing)
+        # .remove() (not just session.delete()) so the in-memory collection
+        # drops the old rows immediately — otherwise statement.transactions
+        # keeps stale references to now-deleted Transactions until the
+        # session is expired, and reconcile_upcoming_expenses below would
+        # try to match against them. delete-orphan cascade handles the
+        # actual DELETE once they're out of the collection.
+        for old_transaction in list(existing.transactions):
+            existing.transactions.remove(old_transaction)
+        session.flush()
+        statement = existing
+        statement.source_note = source_note
+        statement.imported_at = dt.datetime.now(dt.UTC)
+    else:
+        statement = Statement(
+            account=account, period_start=period_start, period_end=period_end, source_note=source_note
+        )
+        session.add(statement)
+        session.flush()
 
     net = 0.0
     for t in classified:
-        raw_date = t["date"]
-        date = raw_date if isinstance(raw_date, dt.date) else dt.date.fromisoformat(raw_date)
+        date = _transaction_date(t)
         amount = float(t["amount"])
         net += amount
         category = get_or_create_category(session, t["category"])
@@ -186,8 +267,18 @@ def import_statement(
             )
         )
 
-    account.current_balance += net
-    account.balance_as_of = period_end
+    if is_historical:
+        pass  # transactions-only — current_balance already reflects this period
+    elif is_front_statement:
+        account.current_balance = (
+            closing_balance if closing_balance is not None else account.current_balance + (net - old_net)
+        )
+    else:
+        account.current_balance = (
+            closing_balance if closing_balance is not None else account.current_balance + net
+        )
+        account.balance_as_of = period_end
+
     reconcile_upcoming_expenses(session, account, statement)
     session.commit()
 

@@ -1,10 +1,15 @@
+import datetime as dt
+
 from PySide6.QtWidgets import QMessageBox
 from sqlalchemy.orm import Session
 
-from app.forecast import account_run_rate
+from app.forecast import account_daily_forecast, account_run_rate
 from app.models import Account, BudgetItem, UpcomingExpense
+from app.ui import theme
 from app.ui.crud_screen import CrudScreen
 from app.ui.dialogs import AccountDialog
+
+FORECAST_DAYS = 30
 
 COLUMNS = [
     ("Name", lambda a: a.name),
@@ -14,6 +19,12 @@ COLUMNS = [
         "Net Monthly Flow",
         lambda a: _net_flow_label(a),
         lambda a: a.net_monthly_flow,
+    ),
+    (
+        f"{FORECAST_DAYS}-Day Forecast",
+        lambda a: f"£{a.forecast_balance_30d:,.2f}",
+        lambda a: a.forecast_balance_30d,
+        lambda a: theme.WARNING if a.forecast_balance_30d < 0 else theme.SUCCESS,
     ),
     (
         "Low Balance Warning",
@@ -51,10 +62,19 @@ def _cc_autopay_label(account: Account) -> str:
     return f"{payment} from {account.cc_payee_account.name} on day {account.cc_payment_day}"
 
 
+def _forecast_balance(session: Session, account: Account, days: int = FORECAST_DAYS) -> float:
+    today = dt.date.today()
+    df = account_daily_forecast(session, account, today, today + dt.timedelta(days=days))
+    if df.height == 0:
+        return account.current_balance
+    return float(df["balance"][-1])
+
+
 def query_accounts(session: Session) -> list[Account]:
     accounts = session.query(Account).order_by(Account.name).all()
     for account in accounts:
         account.net_monthly_flow = account_run_rate(session, account)["avg_monthly_net"]
+        account.forecast_balance_30d = _forecast_balance(session, account)
     return accounts
 
 

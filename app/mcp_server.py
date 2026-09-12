@@ -263,6 +263,7 @@ def import_statement(
     period_start: str | None = None,
     period_end: str | None = None,
     source_note: str | None = None,
+    closing_balance: float | None = None,
 ) -> dict:
     """Save a billing period's transactions, classify them, update the account
     balance, and refresh this account's budget suggestions.
@@ -273,15 +274,37 @@ def import_statement(
     find_recurring_transactions). Amount is signed: positive = money in,
     negative = money out.
 
-    period_start/period_end (ISO dates) default to the min/max transaction
-    date if omitted. Statements must be imported in chronological order per
-    account: the balance is updated by summing the imported transactions
-    onto current_balance and advancing balance_as_of to period_end, so an
-    out-of-order (backdated) import is rejected to avoid double-counting.
+    Re-importing an already-imported period (same account + period_start +
+    period_end) upserts: its old transactions are replaced with the new
+    ones, rather than rejecting as a duplicate — this is how you correct a
+    statement whose balance came out wrong (e.g. it was primed with the
+    wrong opening balance sign on a credit card). Pass `closing_balance` if
+    you read one off the statement (positive = money present for a normal
+    account, negative = amount owed for a credit card) — it's applied
+    directly rather than added on top of whatever current_balance already
+    is, so it self-corrects even if the account had drifted for an
+    unrelated reason.
 
-    Returns the saved statement, its budget-vs-actual report for the period,
-    and this account's currently pending budget suggestions (new ones from
-    this import, plus any still outstanding from before).
+    period_start/period_end (ISO dates) default to the min/max transaction
+    date if omitted. The account's running balance only moves when this
+    statement is (or becomes) the one that defines it: if its period ends
+    on or before the account's current balance_as_of — and it isn't the
+    statement currently defining that date — it's treated as historical
+    backfill, saved purely as transaction history with current_balance left
+    untouched. Otherwise current_balance is set from `closing_balance` if
+    given, else incremented by the net of its transactions, and
+    balance_as_of advances to period_end. A period that starts before
+    balance_as_of but ends after it (straddling the known date, and not the
+    statement that set it) is rejected, since applying it would
+    double-count the overlapping days. This means statements can be
+    imported in any order, and re-imported at any time — check
+    `balance_updated` in the response to see whether this one moved the
+    running balance.
+
+    Returns the saved statement, whether the account balance was updated,
+    its budget-vs-actual report for the period, and this account's currently
+    pending budget suggestions (new ones from this import, plus any still
+    outstanding from before).
     """
     session = get_session()
     try:
@@ -295,7 +318,10 @@ def import_statement(
         start = _parse_date(period_start) or min(dates)
         end = _parse_date(period_end) or max(dates)
 
-        statement = _import_statement_core(session, acc, transactions, start, end, source_note)
+        balance_before = acc.current_balance
+        statement = _import_statement_core(
+            session, acc, transactions, start, end, source_note, closing_balance
+        )
         report = _budget_vs_actual_report(session, statement)
         suggestions = (
             session.query(BudgetSuggestion)
@@ -305,6 +331,9 @@ def import_statement(
         )
         return {
             "statement": _statement_to_dict(statement),
+            "balance_updated": acc.current_balance != balance_before,
+            "account_balance": acc.current_balance,
+            "account_balance_as_of": acc.balance_as_of.isoformat(),
             "budget_vs_actual": report,
             "pending_suggestions": [_suggestion_to_dict(s) for s in suggestions],
         }

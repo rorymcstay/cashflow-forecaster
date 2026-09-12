@@ -86,6 +86,7 @@ _SKIP_DESC_PREFIXES = ("BALANCEBROUGHTFORWARD", "BALANCECARRIEDFORWARD")
 _MARKER_TOKENS = {"DD", "VIS", "BP", "CR", "OBP", "ATM", "TFR", "SO", "CHG", ")))", "A", "."}
 _HSBC_PERIOD_RE = re.compile(r"(\d{1,2})\s+(\w+)\s+to\s+(\d{1,2})\s+(\w+)\s+(\d{4})")
 _HSBC_SUMMARY_RE = re.compile(r"Payments In\s*£([\d,]+\.\d{2})\s*Payments Out\s*£([\d,]+\.\d{2})")
+_HSBC_CLOSING_RE = re.compile(r"ClosingBalance\s*£([\d,]+\.\d{2})")
 
 
 def _in_range(x: float, rng: tuple[float, float]) -> bool:
@@ -101,12 +102,17 @@ def extract_hsbc_period(text: str) -> tuple[dt.date, dt.date] | None:
 
 
 def extract_hsbc_summary(text: str) -> dict | None:
-    m = _HSBC_SUMMARY_RE.search(text.replace("\n", " "))
+    joined = text.replace("\n", " ")
+    m = _HSBC_SUMMARY_RE.search(joined)
     if not m:
         return None
+    closing_m = _HSBC_CLOSING_RE.search(joined)
     return {
         "expected_in": float(m.group(1).replace(",", "")),
         "expected_out": float(m.group(2).replace(",", "")),
+        # A normal account's own "ClosingBalance" is already the figure this
+        # app stores directly — positive means money present, same as ours.
+        "closing_balance": float(closing_m.group(1).replace(",", "")) if closing_m else None,
     }
 
 
@@ -209,8 +215,15 @@ def extract_amex_summary(text: str) -> dict | None:
     m = _AMEX_SUMMARY_RE.search(text)
     if not m:
         return None
-    _, credits, debits, _ = m.groups()
-    return {"expected_in": float(credits.replace(",", "")), "expected_out": float(debits.replace(",", ""))}
+    _, credits, debits, closing = m.groups()
+    return {
+        "expected_in": float(credits.replace(",", "")),
+        "expected_out": float(debits.replace(",", "")),
+        # Amex states this as a positive "amount owed" — this app stores
+        # credit-card debt as negative, so flip the sign here once, at the
+        # source, rather than leaving every caller to remember to.
+        "closing_balance": -float(closing.replace(",", "")),
+    }
 
 
 def parse_amex(path: Path, period: tuple[dt.date, dt.date] | None = None) -> list[dict]:
@@ -312,7 +325,9 @@ def parse_pdf_statement(file_path: str) -> dict:
         transactions = parse_amex(path, period=period)
 
     reconciliation = None
+    closing_balance = None
     if summary is not None:
+        closing_balance = summary.get("closing_balance")
         actual_in = round(sum(t["amount"] for t in transactions if t["amount"] > 0), 2)
         actual_out = round(sum(-t["amount"] for t in transactions if t["amount"] < 0), 2)
         reconciliation = {
@@ -333,4 +348,9 @@ def parse_pdf_statement(file_path: str) -> dict:
         "period_end": period[1].isoformat() if period else None,
         "account_hint": ACCOUNT_HINTS.get(kind),
         "reconciliation": reconciliation,
+        # The statement's own stated closing balance, already sign-adjusted
+        # to this app's convention — pass straight to import_statement's
+        # closing_balance param so a re-import can correct current_balance
+        # even if it had drifted from something other than this statement.
+        "closing_balance": closing_balance,
     }

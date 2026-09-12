@@ -169,14 +169,24 @@ def statements_page():
                 if account is None:
                     ui.notify("Choose an account first.", type="negative")
                     return
+                period_start = dt.date.fromisoformat(start_input.value)
+                period_end = dt.date.fromisoformat(end_input.value)
+                is_reimport = (
+                    session.query(Statement)
+                    .filter_by(account_id=account.id, period_start=period_start, period_end=period_end)
+                    .first()
+                    is not None
+                )
+                balance_before = account.current_balance
                 try:
                     import_statement(
                         session,
                         account,
                         parsed["transactions"],
-                        dt.date.fromisoformat(start_input.value),
-                        dt.date.fromisoformat(end_input.value),
+                        period_start,
+                        period_end,
                         source_note=filename,
+                        closing_balance=parsed.get("closing_balance"),
                     )
                 except ValueError as exc:
                     ui.notify(str(exc), type="negative")
@@ -185,7 +195,18 @@ def statements_page():
                 refresh_statements()
                 refresh_suggestions()
                 refresh_gaps()
-                ui.notify(f"Imported {filename}.", type="positive")
+                verb = "Updated" if is_reimport else "Imported"
+                if account.current_balance == balance_before:
+                    ui.notify(
+                        f"{verb} {filename} as historical — balance already known as of "
+                        f"{account.balance_as_of.strftime('%d %b %Y')}, so it wasn't changed.",
+                        type="positive",
+                    )
+                else:
+                    ui.notify(
+                        f"{verb} {filename} — balance now {_money(account.current_balance)}.",
+                        type="positive",
+                    )
 
         ui.label("Imported Statements").classes("text-xl font-bold mt-2")
         statements_table = ui.table(
