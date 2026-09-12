@@ -14,6 +14,7 @@ from app.web.pages import (  # noqa: F401
     dashboard,
     investment_sim,
     statements,
+    transactions,
     upcoming_expenses,
 )
 

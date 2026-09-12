@@ -11,9 +11,11 @@ MODULES = [
     "app.market_data",
     "app.mcp_server",
     "app.models",
+    "app.pdf_statement_parsers",
     "app.seed",
     "app.statement_import",
     "app.statements",
+    "app.transactions",
     "app.ui.accounts_screen",
     "app.ui.budget_items_screen",
     "app.ui.budget_view_screen",
@@ -26,6 +28,7 @@ MODULES = [
     "app.ui.statements_screen",
     "app.ui.table_models",
     "app.ui.theme",
+    "app.ui.transactions_screen",
     "app.ui.upcoming_expenses_screen",
     "app.ui.widgets",
     "app.web.layout",
@@ -36,6 +39,7 @@ MODULES = [
     "app.web.pages.dashboard",
     "app.web.pages.investment_sim",
     "app.web.pages.statements",
+    "app.web.pages.transactions",
     "app.web.pages.upcoming_expenses",
 ]
 

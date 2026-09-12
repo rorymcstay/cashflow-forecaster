@@ -8,6 +8,7 @@ parsing and pattern-matching only) — this module turns that into saved
 Transaction rows, account balance updates, and BudgetItem suggestions.
 """
 
+import calendar
 import datetime as dt
 from collections import defaultdict
 
@@ -432,3 +433,49 @@ def reject_suggestion(session: Session, suggestion: BudgetSuggestion) -> None:
     suggestion.status = SuggestionStatus.REJECTED
     suggestion.decided_at = dt.datetime.now(dt.UTC)
     session.commit()
+
+
+def detect_account_for_hint(accounts: list[Account], hint: str | None) -> int | None:
+    """Match a parsed statement's bank-name hint (e.g. "HSBC", "Amex") against
+    existing accounts by a case-insensitive substring of the account name.
+    Returns the id only when exactly one account matches — an ambiguous or
+    empty match is left for the user to pick explicitly, since silently
+    guessing wrong would misfile a statement's transactions."""
+    if not hint:
+        return None
+    matches = [a.id for a in accounts if hint.lower() in a.name.lower()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _month_start(d: dt.date) -> dt.date:
+    return dt.date(d.year, d.month, 1)
+
+
+def _next_month(d: dt.date) -> dt.date:
+    return dt.date(d.year + 1, 1, 1) if d.month == 12 else dt.date(d.year, d.month + 1, 1)
+
+
+def find_statement_gaps(
+    session: Session, account_id: int, start_date: dt.date, end_date: dt.date
+) -> list[dict]:
+    """Calendar months between start_date and end_date that no imported
+    Statement for this account overlaps at all — billing cycles rarely line
+    up with calendar months, so "gap" here means the whole month has no
+    statement coverage, not that one specific day is missing."""
+    statements = (
+        session.query(Statement)
+        .filter(Statement.account_id == account_id)
+        .filter(Statement.period_end >= start_date)
+        .filter(Statement.period_start <= end_date)
+        .all()
+    )
+    gaps = []
+    month = _month_start(start_date)
+    while month <= end_date:
+        days_in_month = calendar.monthrange(month.year, month.month)[1]
+        month_end = dt.date(month.year, month.month, days_in_month)
+        covered = any(s.period_start <= month_end and s.period_end >= month for s in statements)
+        if not covered:
+            gaps.append({"month": month.strftime("%Y-%m"), "label": month.strftime("%B %Y")})
+        month = _next_month(month)
+    return gaps

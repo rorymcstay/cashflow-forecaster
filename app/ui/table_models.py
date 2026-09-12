@@ -1,6 +1,7 @@
 from collections.abc import Callable
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtGui import QColor
 
 SORT_ROLE = Qt.ItemDataRole.UserRole
 
@@ -8,14 +9,16 @@ SORT_ROLE = Qt.ItemDataRole.UserRole
 class ObjectTableModel(QAbstractTableModel):
     """Generic read-only table model over a list of arbitrary objects.
 
-    `columns` is a list of (header, getter) or (header, getter, sort_key)
-    tuples. `getter(obj)` produces the display string; `sort_key(obj)`
-    (optional) produces the raw, directly-comparable value used for sorting
-    and grouping — e.g. a float for a "£150.00" column, or a date for a
-    "01 Aug 2025" column — since string-sorting formatted display text gives
-    the wrong order for numbers and dates. Defaults to the getter's own
-    return value when no sort_key is given, which is correct for plain text
-    columns.
+    `columns` is a list of (header, getter), (header, getter, sort_key), or
+    (header, getter, sort_key, color_fn) tuples. `getter(obj)` produces the
+    display string; `sort_key(obj)` (optional) produces the raw, directly-
+    comparable value used for sorting and grouping — e.g. a float for a
+    "£150.00" column, or a date for a "01 Aug 2025" column — since
+    string-sorting formatted display text gives the wrong order for numbers
+    and dates. Defaults to the getter's own return value when no sort_key is
+    given, which is correct for plain text columns. `color_fn(obj)`
+    (optional) returns a `QColor` to render that cell's text in, or `None`
+    for the default color — e.g. red/green for a signed amount.
     """
 
     def __init__(self, columns: list[tuple], rows=None, parent=None):
@@ -39,6 +42,9 @@ class ObjectTableModel(QAbstractTableModel):
         if role == SORT_ROLE:
             sort_key = col[2] if len(col) > 2 else col[1]
             return sort_key(obj)
+        if role == Qt.ItemDataRole.ForegroundRole and len(col) > 3:
+            color = col[3](obj)
+            return QColor(color) if color is not None else None
         return None
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):

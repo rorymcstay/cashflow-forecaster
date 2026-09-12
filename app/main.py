@@ -22,6 +22,7 @@ from app.ui.cashflow_screen import CashflowForecastScreen
 from app.ui.dashboard_screen import DashboardScreen
 from app.ui.investment_sim_screen import InvestmentSimScreen
 from app.ui.statements_screen import StatementsScreen
+from app.ui.transactions_screen import TransactionsScreen
 from app.ui.upcoming_expenses_screen import UpcomingExpensesScreen
 
 
@@ -78,6 +79,7 @@ class MainWindow(QMainWindow):
         self.budget_items_screen = BudgetItemsScreen(self.session, on_change=self.on_data_changed)
         self.upcoming_screen = UpcomingExpensesScreen(self.session, on_change=self.on_data_changed)
         self.statements_screen = StatementsScreen(self.session, on_change=self.on_data_changed)
+        self.transactions_screen = TransactionsScreen(self.session)
         self.budget_view_screen = BudgetViewScreen(self.session)
         self.cashflow_screen = CashflowForecastScreen(self.session)
         self.investment_sim_screen = InvestmentSimScreen(self.session)
@@ -87,6 +89,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.budget_items_screen, "Budget Items")
         self.tabs.addTab(self.upcoming_screen, "Upcoming Expenses")
         self.tabs.addTab(self.statements_screen, "Statements")
+        self.tabs.addTab(self.transactions_screen, "Transactions")
         self.tabs.addTab(self.budget_view_screen, "Budget")
         self.tabs.addTab(self.cashflow_screen, "Cash Flow Forecast")
         self.tabs.addTab(self.investment_sim_screen, "Investment Simulation")
@@ -98,6 +101,8 @@ class MainWindow(QMainWindow):
         self.dashboard_screen.refresh()
         self.statements_screen.reload_accounts()
         self.statements_screen.refresh()
+        self.transactions_screen.reload_accounts()
+        self.transactions_screen.refresh()
         self.budget_view_screen.reload_accounts()
         self.budget_view_screen.refresh()
         self.cashflow_screen.reload_accounts()
@@ -112,6 +117,9 @@ class MainWindow(QMainWindow):
         elif widget is self.statements_screen:
             self.statements_screen.reload_accounts()
             self.statements_screen.refresh()
+        elif widget is self.transactions_screen:
+            self.transactions_screen.reload_accounts()
+            self.transactions_screen.refresh()
         elif widget is self.budget_view_screen:
             self.budget_view_screen.reload_accounts()
             self.budget_view_screen.refresh()

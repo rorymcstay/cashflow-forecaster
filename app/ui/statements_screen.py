@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QDateEdit,
     QDialog,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -21,20 +22,26 @@ from PySide6.QtWidgets import (
 from sqlalchemy.orm import Session
 
 from app.models import Account, BudgetSuggestion, Statement, SuggestionStatus, Transaction
+from app.pdf_statement_parsers import parse_pdf_statement
 from app.statement_import import (
     accept_suggestion,
     budget_vs_actual_report,
+    detect_account_for_hint,
+    find_statement_gaps,
     import_statement,
     reject_suggestion,
 )
 from app.statements import extract_csv_transactions
 from app.ui import theme
 from app.ui.dialogs import TransactionCategoryDialog
+from app.ui.widgets import AccountMultiSelect
 
 SECTION_BG = QColor(theme.SECTION_BG)
 TOTAL_BG = QColor(theme.TOTAL_BG)
 SUCCESS = QColor(theme.SUCCESS)
 WARNING = QColor(theme.WARNING)
+
+_KIND_LABELS = {"hsbc_premier": "HSBC Premier PDF", "amex": "Amex PDF", "csv": "CSV"}
 
 
 def _to_pydate(qd: QDate) -> dt.date:
@@ -52,28 +59,34 @@ def _money(value: float) -> QTableWidgetItem:
 
 
 class StatementsScreen(QWidget):
-    """Import bank/card statements, review the classified transactions and
-    budget-vs-actual report for that billing period, and accept/reject the
-    budget suggestions generated from transaction history.
+    """Import bank/card statements (CSV or PDF, by browsing or dragging files
+    onto this screen), review the classified transactions and budget-vs-actual
+    report for that billing period, accept/reject budget suggestions, and see
+    which months have no statement coverage yet.
 
-    PDF statements aren't handled here — their layouts vary too much for one
-    parser (see app/statements.py's read_pdf_text), so those still go through
+    PDFs are only structurally parsed for the HSBC Premier and Amex layouts
+    (see app/pdf_statement_parsers.py) — anything else still goes through
     chat: read_pdf_statement -> transcribe -> the import_statement MCP tool.
-    This screen covers the CSV happy path directly, plus reviewing/deciding
-    on anything imported either way.
     """
 
     def __init__(self, session: Session, on_change=None, parent=None):
         super().__init__(parent)
         self.session = session
         self.on_change = on_change
-        self._pending_transactions: list[dict] = []
         self._selected_statement: Statement | None = None
+        self.setAcceptDrops(True)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<h2>Statements</h2>"))
 
         layout.addWidget(self._build_import_panel())
+
+        layout.addWidget(QLabel("<b>Pending Imports</b>"))
+        self.pending_placeholder = QLabel("Drop a file above to see it here before importing.")
+        self.pending_placeholder.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        layout.addWidget(self.pending_placeholder)
+        self.pending_layout = QVBoxLayout()
+        layout.addLayout(self.pending_layout)
 
         layout.addWidget(QLabel("<b>Imported Statements</b>"))
         self.statements_table = QTableWidget()
@@ -99,121 +112,240 @@ class StatementsScreen(QWidget):
 
         layout.addWidget(self._build_detail_panel())
         layout.addWidget(self._build_suggestions_panel())
+        layout.addWidget(self._build_gaps_panel())
 
         self.reload_accounts()
         self.refresh()
 
+    # -- drag & drop ---------------------------------------------------
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        for path in paths:
+            self._process_file(path)
+        event.acceptProposedAction()
+
     # -- import panel --------------------------------------------------
 
     def _build_import_panel(self) -> QWidget:
-        panel = QWidget()
+        panel = QFrame()
+        panel.setStyleSheet(f"QFrame {{ border: 2px dashed {theme.BORDER}; border-radius: 8px; }}")
         outer = QVBoxLayout(panel)
-        outer.setContentsMargins(0, 0, 0, 0)
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Account:"))
-        self.account_combo = QComboBox()
-        row.addWidget(self.account_combo)
+        hint = QLabel("Drag & drop CSV or PDF statements here")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        outer.addWidget(hint)
 
-        self.file_btn = QPushButton("Choose CSV File…")
-        self.file_btn.clicked.connect(self._choose_file)
-        row.addWidget(self.file_btn)
-
-        self.file_label = QLabel("No file chosen")
-        self.file_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        row.addWidget(self.file_label, stretch=1)
-
-        row.addWidget(QLabel("Period:"))
-        self.start_edit = QDateEdit(QDate.currentDate())
-        self.start_edit.setCalendarPopup(True)
-        row.addWidget(self.start_edit)
-        row.addWidget(QLabel("to"))
-        self.end_edit = QDateEdit(QDate.currentDate())
-        self.end_edit.setCalendarPopup(True)
-        row.addWidget(self.end_edit)
-
-        self.import_btn = QPushButton("Import")
-        self.import_btn.setObjectName("primaryButton")
-        self.import_btn.setEnabled(False)
-        self.import_btn.clicked.connect(self._do_import)
-        row.addWidget(self.import_btn)
-        outer.addLayout(row)
+        browse_row = QHBoxLayout()
+        browse_row.addStretch()
+        browse_btn = QPushButton("Browse Files…")
+        browse_btn.clicked.connect(self._choose_files)
+        browse_row.addWidget(browse_btn)
+        browse_row.addStretch()
+        outer.addLayout(browse_row)
 
         note = QLabel(
-            "PDF statements aren't parsed here — their layouts vary too much for one parser. "
-            "Read them via chat (read_pdf_statement) and import with the import_statement tool instead."
+            "PDFs are structurally parsed for HSBC Premier and Amex layouts only — anything else falls "
+            "back to reading it via chat (read_pdf_statement) and importing with the import_statement "
+            "tool instead."
         )
         note.setWordWrap(True)
+        note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         note.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
         outer.addWidget(note)
         return panel
 
-    def _choose_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Choose CSV Statement", "", "CSV Files (*.csv)")
-        if not file_path:
-            return
+    def _choose_files(self):
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, "Choose Statement Files", "", "Statements (*.csv *.pdf)"
+        )
+        for path in file_paths:
+            self._process_file(path)
+
+    def _process_file(self, path: str):
+        suffix = Path(path).suffix.lower()
         try:
-            transactions = extract_csv_transactions(file_path)
+            if suffix == ".csv":
+                parsed = {
+                    "kind": "csv",
+                    "transactions": extract_csv_transactions(path),
+                    "period_start": None,
+                    "period_end": None,
+                    "account_hint": None,
+                    "reconciliation": None,
+                }
+            elif suffix == ".pdf":
+                parsed = parse_pdf_statement(path)
+            else:
+                QMessageBox.warning(self, "Unsupported file", f"Unsupported file type: {Path(path).name}")
+                return
         except Exception as exc:
-            QMessageBox.warning(self, "Couldn't read file", str(exc))
-            return
-        if not transactions:
-            QMessageBox.warning(self, "No transactions found", "That file didn't contain any transactions.")
+            QMessageBox.warning(self, "Couldn't read file", f"{Path(path).name}: {exc}")
             return
 
-        self._pending_transactions = transactions
-        self.file_label.setText(Path(file_path).name)
-        dates = [dt.date.fromisoformat(t["date"]) for t in transactions]
-        self.start_edit.setDate(_to_qdate(min(dates)))
-        self.end_edit.setDate(_to_qdate(max(dates)))
-        self.import_btn.setEnabled(True)
-
-    def _do_import(self):
-        if not self._pending_transactions:
-            return
-        account_id = self.account_combo.currentData()
-        if account_id is None:
-            QMessageBox.warning(self, "No account", "Add an account first, on the Accounts tab.")
-            return
-        account = self.session.get(Account, account_id)
-        period_start = _to_pydate(self.start_edit.date())
-        period_end = _to_pydate(self.end_edit.date())
-
-        try:
-            statement = import_statement(
-                self.session,
-                account,
-                self._pending_transactions,
-                period_start,
-                period_end,
-                source_note=self.file_label.text(),
-            )
-        except ValueError as exc:
-            QMessageBox.warning(self, "Couldn't import statement", str(exc))
+        if not parsed["transactions"]:
+            if suffix == ".pdf" and parsed.get("kind") is None:
+                QMessageBox.information(
+                    self,
+                    "Unrecognised PDF",
+                    f"Couldn't recognise the PDF format of {Path(path).name} — read it via chat "
+                    "(read_pdf_statement) and import with the import_statement tool instead.",
+                )
+            else:
+                QMessageBox.warning(
+                    self, "No transactions found", f"{Path(path).name} didn't contain any transactions."
+                )
             return
 
-        self._pending_transactions = []
-        self.file_label.setText("No file chosen")
-        self.import_btn.setEnabled(False)
-        self._notify_change()
-        self._select_statement_row(statement.id)
+        self._add_pending_card(Path(path).name, parsed)
+
+    # -- pending imports -------------------------------------------------
+
+    def _add_pending_card(self, filename: str, parsed: dict):
+        self.pending_placeholder.setVisible(False)
+        accounts = self.session.query(Account).order_by(Account.name).all()
+        hint = parsed.get("account_hint")
+        default_account_id = detect_account_for_hint(accounts, hint)
+
+        dates = [dt.date.fromisoformat(t["date"]) for t in parsed["transactions"]]
+        period_start = (
+            dt.date.fromisoformat(parsed["period_start"]) if parsed.get("period_start") else min(dates)
+        )
+        period_end = dt.date.fromisoformat(parsed["period_end"]) if parsed.get("period_end") else max(dates)
+
+        card = QFrame()
+        card.setStyleSheet(
+            f"background-color: {theme.SURFACE}; border: 1px solid {theme.BORDER}; border-radius: 8px;"
+        )
+        outer = QVBoxLayout(card)
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel(f"<b>{filename}</b>"))
+        kind_label = QLabel(_KIND_LABELS.get(parsed.get("kind"), "PDF"))
+        kind_label.setStyleSheet(
+            f"background-color: {theme.ACCENT}; color: {theme.ACCENT_TEXT}; "
+            "padding: 1px 8px; border-radius: 4px;"
+        )
+        top_row.addWidget(kind_label)
+        if hint:
+            if default_account_id is not None:
+                account_name = next(a.name for a in accounts if a.id == default_account_id)
+                detected_label = QLabel(f"Detected account: {account_name}")
+                detected_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            else:
+                detected_label = QLabel(f"Detected bank: {hint} — choose the account below")
+                detected_label.setStyleSheet(f"color: {theme.WARNING};")
+            top_row.addWidget(detected_label)
+        top_row.addStretch()
+        outer.addLayout(top_row)
+
+        mid_row = QHBoxLayout()
+        mid_row.addWidget(QLabel("Account:"))
+        account_combo = QComboBox()
+        for a in accounts:
+            account_combo.addItem(a.name, a.id)
+        if default_account_id is not None:
+            idx = account_combo.findData(default_account_id)
+            if idx >= 0:
+                account_combo.setCurrentIndex(idx)
+        mid_row.addWidget(account_combo)
+        mid_row.addWidget(QLabel("Period:"))
+        start_edit = QDateEdit(_to_qdate(period_start))
+        start_edit.setCalendarPopup(True)
+        mid_row.addWidget(start_edit)
+        mid_row.addWidget(QLabel("to"))
+        end_edit = QDateEdit(_to_qdate(period_end))
+        end_edit.setCalendarPopup(True)
+        mid_row.addWidget(end_edit)
+        count_label = QLabel(f"{len(parsed['transactions'])} transactions")
+        count_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        mid_row.addWidget(count_label)
+        mid_row.addStretch()
+        outer.addLayout(mid_row)
+
+        recon = parsed.get("reconciliation")
+        if recon is not None:
+            if recon["ok"]:
+                recon_label = QLabel(
+                    f"✓ Reconciles with the statement's own summary — in £{recon['actual_in']:,.2f}, "
+                    f"out £{recon['actual_out']:,.2f}"
+                )
+                recon_label.setStyleSheet(f"color: {theme.SUCCESS}; font-size: 11px;")
+            else:
+                recon_label = QLabel(
+                    "⚠ Doesn't reconcile with the statement's own summary — expected in "
+                    f"£{recon['expected_in']:,.2f} / out £{recon['expected_out']:,.2f}, parsed in "
+                    f"£{recon['actual_in']:,.2f} / out £{recon['actual_out']:,.2f}. Review before importing."
+                )
+                recon_label.setStyleSheet(f"color: {theme.WARNING}; font-size: 11px;")
+            recon_label.setWordWrap(True)
+            outer.addWidget(recon_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        discard_btn = QPushButton("Discard")
+        import_btn = QPushButton("Import")
+        import_btn.setObjectName("primaryButton")
+        btn_row.addWidget(discard_btn)
+        btn_row.addWidget(import_btn)
+        outer.addLayout(btn_row)
+
+        self.pending_layout.addWidget(card)
+
+        def discard():
+            self.pending_layout.removeWidget(card)
+            # hide() immediately — removeWidget() alone leaves the widget
+            # visible at its old position (just unmanaged) until deleteLater()'s
+            # deferred deletion actually runs on the next event loop turn.
+            card.hide()
+            card.deleteLater()
+            if self.pending_layout.count() == 0:
+                self.pending_placeholder.setVisible(True)
+
+        def do_import():
+            account_id = account_combo.currentData()
+            if account_id is None:
+                QMessageBox.warning(self, "No account", "Choose an account first.")
+                return
+            account = self.session.get(Account, account_id)
+            if account is None:
+                QMessageBox.warning(self, "No account", "Choose an account first.")
+                return
+            try:
+                import_statement(
+                    self.session,
+                    account,
+                    parsed["transactions"],
+                    _to_pydate(start_edit.date()),
+                    _to_pydate(end_edit.date()),
+                    source_note=filename,
+                )
+            except ValueError as exc:
+                QMessageBox.warning(self, "Couldn't import statement", str(exc))
+                return
+            discard()
+            self._notify_change()
+
+        discard_btn.clicked.connect(discard)
+        import_btn.clicked.connect(do_import)
 
     # -- statements table -------------------------------------------------
 
     def reload_accounts(self):
-        current = self.account_combo.currentData() if self.account_combo.count() else None
-        self.account_combo.blockSignals(True)
-        self.account_combo.clear()
-        for account in self.session.query(Account).order_by(Account.name).all():
-            self.account_combo.addItem(account.name, account.id)
-        idx = self.account_combo.findData(current)
-        self.account_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.account_combo.blockSignals(False)
+        accounts = self.session.query(Account).order_by(Account.name).all()
+        history_ids = {row[0] for row in self.session.query(Statement.account_id).distinct().all()}
+        self.gap_account_select.set_accounts(accounts, default_checked_ids=history_ids)
 
     def refresh(self):
         self._refresh_statements_table()
         self._refresh_suggestions_table()
         self._refresh_detail(None)
+        self._refresh_gaps()
 
     def _refresh_statements_table(self):
         statements = self.session.query(Statement).order_by(Statement.period_start.desc()).all()
@@ -450,6 +582,70 @@ class StatementsScreen(QWidget):
             return
         reject_suggestion(self.session, sg)
         self._notify_change()
+
+    # -- missing statements panel --------------------------------------------
+
+    def _build_gaps_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("<b>Missing Statements</b>"))
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Accounts:"))
+        self.gap_account_select = AccountMultiSelect(self)
+        self.gap_account_select.selectionChanged.connect(self._refresh_gaps)
+        row.addWidget(self.gap_account_select)
+        row.addWidget(QLabel("From:"))
+        self.gap_start_edit = QDateEdit(_to_qdate(dt.date.today() - dt.timedelta(days=365)))
+        self.gap_start_edit.setCalendarPopup(True)
+        row.addWidget(self.gap_start_edit)
+        row.addWidget(QLabel("to"))
+        self.gap_end_edit = QDateEdit(QDate.currentDate())
+        self.gap_end_edit.setCalendarPopup(True)
+        row.addWidget(self.gap_end_edit)
+        check_btn = QPushButton("Check")
+        check_btn.clicked.connect(self._refresh_gaps)
+        row.addWidget(check_btn)
+        row.addStretch()
+        layout.addLayout(row)
+
+        self.gaps_container = QVBoxLayout()
+        layout.addLayout(self.gaps_container)
+        return panel
+
+    def _refresh_gaps(self):
+        while self.gaps_container.count():
+            item = self.gaps_container.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.deleteLater()
+
+        start = _to_pydate(self.gap_start_edit.date())
+        end = _to_pydate(self.gap_end_edit.date())
+        found_any = False
+        for account_id in self.gap_account_select.checked_ids():
+            account = self.session.get(Account, account_id)
+            if account is None:
+                continue
+            gaps = find_statement_gaps(self.session, account_id, start, end)
+            if not gaps:
+                continue
+            found_any = True
+            gap_row = QHBoxLayout()
+            name_label = QLabel(account.name)
+            name_label.setStyleSheet("font-weight: bold;")
+            name_label.setFixedWidth(160)
+            gap_row.addWidget(name_label)
+            gaps_label = QLabel(", ".join(g["label"] for g in gaps))
+            gaps_label.setWordWrap(True)
+            gaps_label.setStyleSheet(f"color: {theme.WARNING};")
+            gap_row.addWidget(gaps_label, stretch=1)
+            self.gaps_container.addLayout(gap_row)
+        if not found_any:
+            label = QLabel("No gaps — every selected account has statement coverage across this range.")
+            label.setStyleSheet(f"color: {theme.SUCCESS};")
+            self.gaps_container.addWidget(label)
 
     # -- shared ------------------------------------------------------------
 

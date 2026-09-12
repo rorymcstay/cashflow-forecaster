@@ -20,11 +20,13 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+import pdfplumber
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.statements import extract_csv_transactions  # noqa: E402
-from app.classify import classify  # noqa: E402
-from scripts.pdf_statement_parsers import parse_hsbc_premier, parse_amex  # noqa: E402
+from app.classify import classify
+from app.pdf_statement_parsers import extract_amex_period, parse_amex, parse_hsbc_premier
+from app.statements import extract_csv_transactions
 
 
 def load_all_transactions(folder: Path) -> list[dict]:
@@ -46,16 +48,15 @@ def load_all_transactions(folder: Path) -> list[dict]:
             )
 
     for f in sorted(folder.glob("*Premier Bank_Statement.pdf")):
-        txns.extend(parse_hsbc_premier(f, "Personal HSBC"))
+        for t in parse_hsbc_premier(f):
+            txns.append({**t, "account": "Personal HSBC", "source_file": f.name})
 
     for f in sorted(folder.glob("*_-_*.pdf")):
-        year = None
-        for part in f.stem.split("_"):
-            if part.isdigit() and len(part) == 4:
-                year = int(part)
-        if year is None:
-            continue
-        txns.extend(parse_amex(f, "Personal Amex", year))
+        with pdfplumber.open(f) as pdf:
+            first_page_text = pdf.pages[0].extract_text() or ""
+        period = extract_amex_period(first_page_text)
+        for t in parse_amex(f, period=period):
+            txns.append({**t, "account": "Personal Amex", "source_file": f.name})
 
     return [t for t in txns if t["date"]]
 

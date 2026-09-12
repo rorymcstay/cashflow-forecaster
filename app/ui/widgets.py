@@ -27,16 +27,24 @@ class AccountMultiSelect(QPushButton):
         self._checked: set[int] = set()
         self.clicked.connect(self._show_popup)
 
-    def set_accounts(self, accounts: list[Account], default_all_checked: bool = True) -> None:
+    def set_accounts(
+        self,
+        accounts: list[Account],
+        default_all_checked: bool = True,
+        default_checked_ids: set[int] | None = None,
+    ) -> None:
         """Repopulate from the current account list, keeping any previously
         checked accounts that still exist. New (first-population) accounts
-        default to all-checked or none-checked per `default_all_checked`."""
+        default to `default_checked_ids` if given, otherwise all-checked or
+        none-checked per `default_all_checked`."""
         previous = self._checked
         had_previous = bool(self._names)
         self._names = {a.id: a.name for a in accounts}
         self._order = [a.id for a in accounts]
         if had_previous:
             self._checked = {i for i in previous if i in self._names}
+        elif default_checked_ids is not None:
+            self._checked = {i for i in default_checked_ids if i in self._names}
         elif default_all_checked:
             self._checked = set(self._order)
         else:

@@ -6,15 +6,20 @@ from pathlib import Path
 from nicegui import events, ui
 
 from app.models import Account, BudgetSuggestion, Category, Statement, SuggestionStatus, Transaction
+from app.pdf_statement_parsers import parse_pdf_statement
 from app.seed import get_or_create_category
 from app.statement_import import (
     accept_suggestion,
     budget_vs_actual_report,
+    detect_account_for_hint,
+    find_statement_gaps,
     import_statement,
     reject_suggestion,
 )
 from app.statements import extract_csv_transactions
-from app.web.layout import SUCCESS, TEXT_MUTED, WARNING, get_page_session, page_shell
+from app.web.layout import BORDER, SUCCESS, TEXT_MUTED, WARNING, get_page_session, page_shell
+
+_KIND_LABELS = {"hsbc_premier": "HSBC Premier PDF", "amex": "Amex PDF", "csv": "CSV"}
 
 
 def _money(value: float | None) -> str:
@@ -26,51 +31,161 @@ def statements_page():
     session = get_page_session()
 
     with page_shell("/statements", "Statements"):
-        pending_transactions: list[dict] = []
-        accounts = session.query(Account).order_by(Account.name).all()
-        account_options = {a.id: a.name for a in accounts}
-
         ui.label(
-            "PDF statements aren't parsed here — their layouts vary too much for one parser. "
-            "Read them via chat (read_pdf_statement) and import with the import_statement tool instead."
+            "CSV and PDF statements are both supported here. PDFs are only structurally parsed for "
+            "HSBC Premier and Amex layouts — anything else falls back to reading it via chat "
+            "(read_pdf_statement) and importing with the import_statement tool instead."
         ).style(f"color: {TEXT_MUTED}; font-size: 12px;")
 
-        with ui.row().classes("items-center gap-4 flex-wrap"):
-            import_account_select = ui.select(
-                account_options, label="Account", value=next(iter(account_options), None)
+        with (
+            ui.column()
+            .classes("w-full items-center gap-2")
+            .style(f"border: 2px dashed {BORDER}; border-radius: 8px; padding: 20px;")
+        ):
+            ui.icon("cloud_upload").classes("text-3xl").style(f"color: {TEXT_MUTED};")
+            ui.label("Drag & drop CSV or PDF statements here, or click to browse").style(
+                f"color: {TEXT_MUTED};"
             )
-            file_label = ui.label("No file chosen").style(f"color: {TEXT_MUTED};")
-            start_input = ui.input("Period start", value=dt.date.today().isoformat()).props("type=date")
-            end_input = ui.input("Period end", value=dt.date.today().isoformat()).props("type=date")
-            import_btn = ui.button("Import", on_click=lambda: do_import())
-            import_btn.disable()
+            upload_widget = (
+                ui.upload(auto_upload=True, multiple=True).props("accept=.csv,.pdf").classes("max-w-md")
+            )
+
+        ui.label("Pending Imports").classes("text-xl font-bold mt-2")
+        pending_container = ui.column().classes("w-full gap-2")
+        pending_placeholder = ui.label("Drop a file above to see it here before importing.").style(
+            f"color: {TEXT_MUTED};"
+        )
 
         async def handle_upload(e: events.UploadEventArguments):
             tmp_path = Path(tempfile.gettempdir()) / f"upload_{uuid.uuid4().hex}_{e.file.name}"
             await e.file.save(tmp_path)
+            suffix = Path(e.file.name).suffix.lower()
             try:
-                transactions = extract_csv_transactions(str(tmp_path))
+                if suffix == ".csv":
+                    parsed = {
+                        "kind": "csv",
+                        "transactions": extract_csv_transactions(str(tmp_path)),
+                        "period_start": None,
+                        "period_end": None,
+                        "account_hint": None,
+                        "reconciliation": None,
+                    }
+                elif suffix == ".pdf":
+                    parsed = parse_pdf_statement(str(tmp_path))
+                else:
+                    ui.notify(f"Unsupported file type: {e.file.name}", type="negative")
+                    return
             except Exception as exc:
-                ui.notify(f"Couldn't read file: {exc}", type="negative")
+                ui.notify(f"Couldn't read {e.file.name}: {exc}", type="negative")
                 return
             finally:
                 tmp_path.unlink(missing_ok=True)
 
-            if not transactions:
-                ui.notify("That file didn't contain any transactions.", type="negative")
+            if not parsed["transactions"]:
+                if suffix == ".pdf" and parsed.get("kind") is None:
+                    ui.notify(
+                        f"Couldn't recognise the PDF format of {e.file.name} — read it via chat "
+                        "(read_pdf_statement) and import with the import_statement tool instead.",
+                        type="warning",
+                    )
+                else:
+                    ui.notify(f"{e.file.name} didn't contain any transactions.", type="negative")
                 return
 
-            pending_transactions.clear()
-            pending_transactions.extend(transactions)
-            file_label.set_text(e.file.name)
-            dates = [dt.date.fromisoformat(t["date"]) for t in transactions]
-            start_input.value = min(dates).isoformat()
-            end_input.value = max(dates).isoformat()
-            import_btn.enable()
+            add_pending_card(e.file.name, parsed)
 
-        ui.upload(label="Choose CSV File…", on_upload=handle_upload, auto_upload=True).props(
-            "accept=.csv"
-        ).classes("max-w-xs")
+        upload_widget.on_upload(handle_upload)
+
+        def add_pending_card(filename: str, parsed: dict):
+            pending_placeholder.set_visibility(False)
+            accounts = session.query(Account).order_by(Account.name).all()
+            account_options = {a.id: a.name for a in accounts}
+            hint = parsed.get("account_hint")
+            default_account = detect_account_for_hint(accounts, hint)
+
+            dates = [dt.date.fromisoformat(t["date"]) for t in parsed["transactions"]]
+            period_start = (
+                dt.date.fromisoformat(parsed["period_start"]) if parsed.get("period_start") else min(dates)
+            )
+            period_end = (
+                dt.date.fromisoformat(parsed["period_end"]) if parsed.get("period_end") else max(dates)
+            )
+
+            with pending_container:
+                card = ui.card().classes("w-full")
+            with card:
+                with ui.row().classes("items-center gap-3 flex-wrap w-full"):
+                    ui.icon("description")
+                    ui.label(filename).classes("font-bold")
+                    ui.badge(_KIND_LABELS.get(parsed.get("kind"), "PDF")).props(
+                        "color=primary" if parsed.get("kind") else "color=grey"
+                    )
+                    if hint:
+                        if default_account is not None:
+                            ui.label(f"Detected account: {account_options[default_account]}").style(
+                                f"color: {TEXT_MUTED};"
+                            )
+                        else:
+                            ui.label(f"Detected bank: {hint} — choose the account below").style(
+                                f"color: {WARNING};"
+                            )
+
+                with ui.row().classes("items-center gap-3 flex-wrap w-full mt-1"):
+                    account_select = ui.select(
+                        account_options, label="Account", value=default_account
+                    ).classes("min-w-[180px]")
+                    start_input = ui.input("Period start", value=period_start.isoformat()).props("type=date")
+                    end_input = ui.input("Period end", value=period_end.isoformat()).props("type=date")
+                    ui.label(f"{len(parsed['transactions'])} transactions").style(f"color: {TEXT_MUTED};")
+
+                recon = parsed.get("reconciliation")
+                if recon is not None:
+                    if recon["ok"]:
+                        ui.label(
+                            f"✓ Reconciles with the statement's own summary — "
+                            f"in {_money(recon['actual_in'])}, out {_money(recon['actual_out'])}"
+                        ).style(f"color: {SUCCESS}; font-size: 12px;")
+                    else:
+                        ui.label(
+                            "⚠ Doesn't reconcile with the statement's own summary — expected in "
+                            f"{_money(recon['expected_in'])} / out {_money(recon['expected_out'])}, parsed in "
+                            f"{_money(recon['actual_in'])} / out {_money(recon['actual_out'])}. Review before "
+                            "importing."
+                        ).style(f"color: {WARNING}; font-size: 12px;")
+
+                with ui.row().classes("justify-end w-full gap-2 mt-1"):
+                    ui.button("Discard", on_click=lambda: discard()).props("flat")
+                    ui.button("Import", on_click=lambda: do_import()).props("color=primary")
+
+            def discard():
+                pending_container.remove(card)
+
+            def do_import():
+                account_id = account_select.value
+                if account_id is None:
+                    ui.notify("Choose an account first.", type="negative")
+                    return
+                account = session.get(Account, account_id)
+                if account is None:
+                    ui.notify("Choose an account first.", type="negative")
+                    return
+                try:
+                    import_statement(
+                        session,
+                        account,
+                        parsed["transactions"],
+                        dt.date.fromisoformat(start_input.value),
+                        dt.date.fromisoformat(end_input.value),
+                        source_note=filename,
+                    )
+                except ValueError as exc:
+                    ui.notify(str(exc), type="negative")
+                    return
+                pending_container.remove(card)
+                refresh_statements()
+                refresh_suggestions()
+                refresh_gaps()
+                ui.notify(f"Imported {filename}.", type="positive")
 
         ui.label("Imported Statements").classes("text-xl font-bold mt-2")
         statements_table = ui.table(
@@ -109,35 +224,52 @@ def statements_page():
         ui.label("Budget Suggestions").classes("text-xl font-bold mt-2")
         suggestions_container = ui.column().classes("w-full gap-2")
 
-        def do_import():
-            if not pending_transactions:
-                return
-            account_id = import_account_select.value
-            if account_id is None:
-                ui.notify("Add an account first, on the Accounts page.", type="negative")
-                return
-            account = session.get(Account, account_id)
-            period_start = dt.date.fromisoformat(start_input.value)
-            period_end = dt.date.fromisoformat(end_input.value)
-
-            try:
-                import_statement(
-                    session,
-                    account,
-                    pending_transactions,
-                    period_start,
-                    period_end,
-                    source_note=file_label.text,
+        ui.label("Missing Statements").classes("text-xl font-bold mt-2")
+        all_accounts = session.query(Account).order_by(Account.name).all()
+        accounts_with_history = {row[0] for row in session.query(Statement.account_id).distinct().all()}
+        with ui.row().classes("items-center gap-4 flex-wrap"):
+            gap_account_select = (
+                ui.select(
+                    {a.id: a.name for a in all_accounts},
+                    label="Accounts",
+                    multiple=True,
+                    value=[a.id for a in all_accounts if a.id in accounts_with_history],
                 )
-            except ValueError as exc:
-                ui.notify(str(exc), type="negative")
-                return
+                .classes("min-w-[220px]")
+                .props("use-chips")
+            )
+            gap_start_input = ui.input(
+                "From", value=(dt.date.today() - dt.timedelta(days=365)).isoformat()
+            ).props("type=date")
+            gap_end_input = ui.input("To", value=dt.date.today().isoformat()).props("type=date")
+            ui.button("Check", on_click=lambda: refresh_gaps())
+        gaps_container = ui.column().classes("w-full gap-1")
 
-            pending_transactions.clear()
-            file_label.set_text("No file chosen")
-            import_btn.disable()
-            refresh_statements()
-            refresh_suggestions()
+        def refresh_gaps():
+            gaps_container.clear()
+            try:
+                start = dt.date.fromisoformat(gap_start_input.value)
+                end = dt.date.fromisoformat(gap_end_input.value)
+            except (ValueError, TypeError):
+                return
+            account_ids = gap_account_select.value or []
+            with gaps_container:
+                found_any = False
+                for account_id in account_ids:
+                    account = session.get(Account, account_id)
+                    if account is None:
+                        continue
+                    gaps = find_statement_gaps(session, account_id, start, end)
+                    if not gaps:
+                        continue
+                    found_any = True
+                    with ui.row().classes("w-full items-start gap-2"):
+                        ui.label(account.name).classes("font-bold").style("width: 160px;")
+                        ui.label(", ".join(g["label"] for g in gaps)).style(f"color: {WARNING};")
+                if not found_any:
+                    ui.label(
+                        "No gaps — every selected account has statement coverage across this range."
+                    ).style(f"color: {SUCCESS};")
 
         def refresh_statements():
             statements = session.query(Statement).order_by(Statement.period_start.desc()).all()
@@ -171,6 +303,7 @@ def statements_page():
             session.commit()
             statements_table.selected = []
             refresh_statements()
+            refresh_gaps()
 
         def reclassify(transaction: Transaction):
             categories = sorted({c.name for c in session.query(Category).all()})
@@ -288,3 +421,4 @@ def statements_page():
 
         refresh_statements()
         refresh_suggestions()
+        refresh_gaps()
