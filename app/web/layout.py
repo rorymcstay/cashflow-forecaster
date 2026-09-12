@@ -22,6 +22,7 @@ NAV_ITEMS = [
     ("/", "Dashboard"),
     ("/accounts", "Accounts"),
     ("/cashflow", "Cash Flow Forecast"),
+    ("/scenarios", "Scenarios"),
     ("/budget-items", "Budget Items"),
     ("/upcoming-expenses", "Upcoming Expenses"),
     ("/statements", "Statements"),

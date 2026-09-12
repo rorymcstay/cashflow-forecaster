@@ -6,6 +6,7 @@ from mcp.server.mcpserver import MCPServer
 from app import investment_sim, market_data
 from app.db import get_session, init_db
 from app.forecast import (
+    HypotheticalItem,
     account_daily_forecast,
     combined_daily_forecast,
     low_balance_warnings,
@@ -26,6 +27,7 @@ from app.models import (
     UpcomingExpense,
     UpcomingExpenseStatus,
 )
+from app.scenario_sim import run_scenario as _run_scenario_core
 from app.seed import get_or_create_category, seed_defaults
 from app.statement_import import (
     UNCATEGORIZED,
@@ -842,6 +844,107 @@ def run_realised_historical_scenarios(
             "best_max_drawdown": drawdowns[-1],
             "scenarios": scenarios,
         }
+    finally:
+        session.close()
+
+
+@server.tool()
+def run_cashflow_scenario(
+    horizon_years: int,
+    accounts: list[str] | None = None,
+    n_paths: int = 500,
+    income_growth_rate_pct: float = 0.0,
+    shock_probability_per_year: float = 0.0,
+    shock_amount: float = 0.0,
+    shock_account: str | None = None,
+    extra_budget_items: list[dict] | None = None,
+    one_time_payment_amount: float | None = None,
+    one_time_payment_account: str | None = None,
+    one_time_payment_year_offsets: list[int] | None = None,
+    use_market_regimes: bool = True,
+    lookback_years: int = 10,
+    seed: int | None = None,
+) -> dict:
+    """Stress-test the cashflow forecast with Monte Carlo shocks, income
+    growth, hypothetical (never-persisted) budget lines, and market-regime
+    variation, all layered on top of the same deterministic engine behind
+    get_cashflow_forecast.
+
+    - accounts: names to include (default: every account).
+    - income_growth_rate_pct: annual % escalation applied to INCOME budget
+      items only (e.g. "what if my salary grows 3%/year").
+    - shock_probability_per_year/shock_amount/shock_account: an independent
+      chance each month of a fixed-size unplanned expense on that account
+      (e.g. probability=15, amount=5000 for a ~15%/yr chance of a £5k car
+      repair). Modeled as a flat, non-compounding hit.
+    - extra_budget_items: hypothetical lines never saved to the database —
+      each dict is {description, amount, account, flow_type ("Income" or
+      "Expense", default Expense), frequency (default "Monthly"),
+      effective_from (ISO date, default today)}. Transfers aren't
+      supported here.
+    - one_time_payment_amount/account/year_offsets: compares a lump-sum
+      payment (e.g. 150000) at several future points (e.g. [1,2,3,4,5]
+      years from now) — unlike shocks, this *is* routed through the real
+      growth engine, so an earlier payment correctly shows a bigger impact
+      than a later one (more foregone compounding).
+    - use_market_regimes: for accounts with holdings, replaces the flat
+      mean-historical-return assumption with historical-bootstrap
+      resampling (same engine as run_investment_simulation) — degrades
+      gracefully (no effect) for accounts with no return data available.
+
+    Returns percentile bands (5/25/50/75/95, monthly) for the combined
+    balance across the horizon, per-offset bands if one_time_payment_amount
+    is given, and a summary (probability of dropping below £0, median
+    ending balance, and payment-timing impact table).
+    """
+    session = get_session()
+    try:
+        account_ids = [_resolve_account(session, name).id for name in accounts] if accounts else None
+        shock_account_id = _resolve_account(session, shock_account).id if shock_account else None
+
+        extra_items = None
+        if extra_budget_items:
+            extra_items = [
+                HypotheticalItem(
+                    description=item["description"],
+                    amount=float(item["amount"]),
+                    flow_type=_resolve_flow_type(item.get("flow_type", "Expense")),
+                    frequency=_resolve_frequency(item.get("frequency", "Monthly")),
+                    account_id=_resolve_account(session, item["account"]).id,
+                    effective_from=_parse_date(item.get("effective_from")) or dt.date.today(),
+                )
+                for item in extra_budget_items
+            ]
+
+        one_time_payment = None
+        if one_time_payment_amount is not None:
+            if one_time_payment_account is None or not one_time_payment_year_offsets:
+                raise ValueError(
+                    "one_time_payment_account and one_time_payment_year_offsets are required "
+                    "together with one_time_payment_amount."
+                )
+            payment_account = _resolve_account(session, one_time_payment_account)
+            one_time_payment = {
+                "amount": one_time_payment_amount,
+                "account_id": payment_account.id,
+                "year_offsets": one_time_payment_year_offsets,
+            }
+
+        return _run_scenario_core(
+            session,
+            horizon_years=horizon_years,
+            account_ids=account_ids,
+            n_paths=n_paths,
+            income_growth_rate_pct=income_growth_rate_pct,
+            shock_probability_per_year=shock_probability_per_year,
+            shock_amount=shock_amount,
+            shock_account_id=shock_account_id,
+            extra_budget_items=extra_items,
+            one_time_payment=one_time_payment,
+            use_market_regimes=use_market_regimes,
+            lookback_years=lookback_years,
+            seed=seed,
+        )
     finally:
         session.close()
 

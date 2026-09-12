@@ -1,6 +1,7 @@
 import calendar
 import datetime as dt
 from collections import defaultdict
+from dataclasses import dataclass, field
 
 import polars as pl
 from dateutil.relativedelta import relativedelta
@@ -20,6 +21,46 @@ PERIOD_MONTHS = {
     Frequency.SIX_MONTHLY: 6,
     Frequency.ANNUALLY: 12,
 }
+
+
+@dataclass
+class HypotheticalItem:
+    """A transient, never-persisted budget-item-shaped line for scenario
+    forecasting (see app/scenario_sim.py) — same occurrence/amount semantics
+    as a real BudgetItem, but it only ever exists in memory for the duration
+    of one forecast call. Income/expense only: a hypothetical line is for
+    "what if I added this budget item", not for modelling a transfer between
+    accounts, so transfers are rejected rather than silently mishandled.
+    """
+
+    description: str
+    amount: float
+    flow_type: FlowType
+    frequency: Frequency
+    account_id: int
+    effective_from: dt.date = field(default_factory=dt.date.today)
+    effective_until: dt.date | None = None
+    target_account: None = field(default=None, init=False)  # transfers unsupported; see __post_init__
+
+    def __post_init__(self) -> None:
+        if self.flow_type == FlowType.TRANSFER:
+            raise ValueError("HypotheticalItem doesn't support transfers — income/expense only.")
+
+
+@dataclass
+class OneOffEvent:
+    """A single, non-recurring transient (date, signed amount) charge scoped
+    to one account — used for "what if I made this one-time payment on this
+    date" scenario forecasting (see app/scenario_sim.py). Flows through the
+    same growth-compounding math as any other event, so a payment correctly
+    forfeits whatever growth it would have earned had it stayed. `amount` is
+    already signed (positive = money in, negative = money out) — unlike
+    HypotheticalItem/BudgetItem, there's no flow_type to derive it from."""
+
+    date: dt.date
+    amount: float
+    description: str
+    account_id: int
 
 
 def generate_occurrences(
@@ -229,16 +270,45 @@ def _monthly_growth_events(
     return growth_events
 
 
+def _income_growth_multiplier(occ: dt.date, income_growth_rate: float) -> float:
+    """Escalation factor for an INCOME occurrence `income_growth_rate`%
+    (annual) years from today — 1.0 for anything today or in the past, since
+    growth only ever projects forward, never rewrites history."""
+    if not income_growth_rate:
+        return 1.0
+    years = (occ - dt.date.today()).days / 365.25
+    return (1 + income_growth_rate / 100) ** years if years > 0 else 1.0
+
+
 def _collect_own_charge_events(
-    session: Session, account: Account, compute_start: dt.date, compute_end: dt.date
+    session: Session,
+    account: Account,
+    compute_start: dt.date,
+    compute_end: dt.date,
+    income_growth_rate: float = 0.0,
+    extra_items: list[HypotheticalItem] | None = None,
+    one_off_events: list[OneOffEvent] | None = None,
 ) -> list[tuple[dt.date, float, str]]:
     """(date, signed_amount, description) for budget items and upcoming
     expenses billed directly to this account — the base "charges" used both
     for its own forecast and, if it's a credit card, to size its autopay.
     Excludes incoming transfers, growth and credit-card autopay, which are
-    layered on separately by `_collect_account_events`."""
+    layered on separately by `_collect_account_events`.
+
+    `income_growth_rate` (annual %) escalates INCOME occurrences the further
+    into the future they fall — 0 (default) reproduces today's flat-forever
+    behavior exactly. `extra_items` are transient HypotheticalItem lines
+    (never persisted) scoped to this account, used for "what if I added
+    this budget line" scenario forecasting. `one_off_events` are transient
+    OneOffEvent charges (e.g. a hypothetical one-time payment) scoped to
+    this account.
+    """
     events: list[tuple[dt.date, float, str]] = []
-    for item in session.query(BudgetItem).filter_by(account_id=account.id).all():
+    items: list[BudgetItem | HypotheticalItem] = list(
+        session.query(BudgetItem).filter_by(account_id=account.id).all()
+    )
+    items += [x for x in (extra_items or []) if x.account_id == account.id]
+    for item in items:
         if item.flow_type == FlowType.TRANSFER:
             signed = -item.amount
             target_name = item.target_account.name if item.target_account else "?"
@@ -249,7 +319,16 @@ def _collect_own_charge_events(
         for occ in generate_occurrences(
             item.effective_from, item.effective_until, item.frequency, compute_start, compute_end
         ):
-            events.append((occ, signed, description))
+            multiplier = (
+                _income_growth_multiplier(occ, income_growth_rate)
+                if item.flow_type == FlowType.INCOME
+                else 1.0
+            )
+            events.append((occ, signed * multiplier, description))
+
+    for one_off in one_off_events or []:
+        if one_off.account_id == account.id and compute_start <= one_off.date <= compute_end:
+            events.append((one_off.date, one_off.amount, one_off.description))
 
     for exp in (
         session.query(UpcomingExpense)
@@ -313,7 +392,12 @@ def _monthly_cc_payment_events(
 
 
 def _credit_card_autopay_events(
-    session: Session, cc_account: Account, compute_end: dt.date
+    session: Session,
+    cc_account: Account,
+    compute_end: dt.date,
+    income_growth_rate: float = 0.0,
+    extra_items: list[HypotheticalItem] | None = None,
+    one_off_events: list[OneOffEvent] | None = None,
 ) -> list[tuple[dt.date, float, str]]:
     """This credit card's autopay credits, computed from its own
     balance_as_of through compute_end — independent of who's asking (the
@@ -324,18 +408,33 @@ def _credit_card_autopay_events(
     compute_start = cc_account.balance_as_of
     if compute_start > compute_end:
         return []
-    own_events = _collect_own_charge_events(session, cc_account, compute_start, compute_end)
+    own_events = _collect_own_charge_events(
+        session, cc_account, compute_start, compute_end, income_growth_rate, extra_items, one_off_events
+    )
     growth_events = _monthly_growth_events(cc_account, own_events, compute_start, compute_end)
     return _monthly_cc_payment_events(cc_account, own_events + growth_events, compute_start, compute_end)
 
 
 def _collect_account_events(
-    session: Session, account: Account, compute_start: dt.date, compute_end: dt.date
+    session: Session,
+    account: Account,
+    compute_start: dt.date,
+    compute_end: dt.date,
+    income_growth_rate: float = 0.0,
+    extra_items: list[HypotheticalItem] | None = None,
+    one_off_events: list[OneOffEvent] | None = None,
 ) -> list[tuple[dt.date, float, str]]:
     """(date, signed_amount, description) for every occurrence of this account's
     budget items, upcoming expenses, cross-account transfers, credit-card
-    autopay and growth accrual within [compute_start, compute_end]."""
-    events = _collect_own_charge_events(session, account, compute_start, compute_end)
+    autopay and growth accrual within [compute_start, compute_end].
+
+    `income_growth_rate`/`extra_items`/`one_off_events`: see
+    `_collect_own_charge_events` — threaded through here too so they also
+    affect this account's growth postings and (if it's a credit card)
+    autopay sizing."""
+    events = _collect_own_charge_events(
+        session, account, compute_start, compute_end, income_growth_rate, extra_items, one_off_events
+    )
 
     for item in session.query(BudgetItem).filter_by(target_account_id=account.id).all():
         description = f"{item.description} (from {item.account.name})"
@@ -356,12 +455,16 @@ def _collect_account_events(
     events += _monthly_growth_events(account, events, compute_start, compute_end)
 
     if account.cc_payee_account_id is not None and account.cc_payment_day is not None:
-        for d, amount, label in _credit_card_autopay_events(session, account, compute_end):
+        for d, amount, label in _credit_card_autopay_events(
+            session, account, compute_end, income_growth_rate, extra_items, one_off_events
+        ):
             if compute_start <= d <= compute_end:
                 events.append((d, amount, label))
 
     for cc_account in session.query(Account).filter(Account.cc_payee_account_id == account.id).all():
-        for d, amount, label in _credit_card_autopay_events(session, cc_account, compute_end):
+        for d, amount, label in _credit_card_autopay_events(
+            session, cc_account, compute_end, income_growth_rate, extra_items, one_off_events
+        ):
             if compute_start <= d <= compute_end:
                 events.append((d, -amount, f"{label} → {cc_account.name}"))
 
@@ -442,7 +545,13 @@ def _historical_account_daily(
 
 
 def account_daily_forecast(
-    session: Session, account: Account, range_start: dt.date, range_end: dt.date
+    session: Session,
+    account: Account,
+    range_start: dt.date,
+    range_end: dt.date,
+    income_growth_rate: float = 0.0,
+    extra_items: list[HypotheticalItem] | None = None,
+    one_off_events: list[OneOffEvent] | None = None,
 ) -> pl.DataFrame:
     """Daily in/out/net/balance/details for one account, sliced to [range_start, range_end].
 
@@ -453,6 +562,12 @@ def account_daily_forecast(
 
     Any portion of the range before balance_as_of is real transaction history
     (from imported statements), not a projection — see _historical_account_daily.
+
+    `income_growth_rate` (annual %, default 0), `extra_items` (transient
+    HypotheticalItem lines, default none) and `one_off_events` (transient
+    OneOffEvent charges, default none) are scenario-forecasting hooks — see
+    app/scenario_sim.py — that leave every existing caller's behavior
+    unchanged when omitted.
     """
     hist_df = pl.DataFrame(schema=_EMPTY_FORECAST_SCHEMA)
     if range_start < account.balance_as_of:
@@ -465,7 +580,9 @@ def account_daily_forecast(
     compute_start = account.balance_as_of
     compute_end = range_end
 
-    events = _collect_account_events(session, account, compute_start, compute_end)
+    events = _collect_account_events(
+        session, account, compute_start, compute_end, income_growth_rate, extra_items, one_off_events
+    )
     details_map = _details_by_date(events)
 
     date_series = pl.date_range(compute_start, compute_end, interval="1d", eager=True)
@@ -509,12 +626,22 @@ def account_daily_forecast(
 
 
 def combined_daily_forecast(
-    session: Session, range_start: dt.date, range_end: dt.date, accounts: list[Account] | None = None
+    session: Session,
+    range_start: dt.date,
+    range_end: dt.date,
+    accounts: list[Account] | None = None,
+    income_growth_rate: float = 0.0,
+    extra_items: list[HypotheticalItem] | None = None,
+    one_off_events: list[OneOffEvent] | None = None,
 ) -> pl.DataFrame:
     """Combined in/out/net/balance across `accounts` (default: every account),
     valid from the latest balance_as_of onward, plus a per-account balance
     breakdown and a details column listing every contributing item that day
-    (prefixed by account)."""
+    (prefixed by account).
+
+    `income_growth_rate`/`extra_items`/`one_off_events`: see
+    `account_daily_forecast` — opt-in scenario-forecasting hooks, default
+    behavior unchanged when omitted."""
     accounts = accounts if accounts is not None else session.query(Account).all()
     empty_schema = {
         "date": pl.Date,
@@ -535,7 +662,9 @@ def combined_daily_forecast(
     per_account = []
     all_details: dict[dt.date, list[str]] = defaultdict(list)
     for account in accounts:
-        df = account_daily_forecast(session, account, effective_start, range_end)
+        df = account_daily_forecast(
+            session, account, effective_start, range_end, income_growth_rate, extra_items, one_off_events
+        )
         if df.height == 0:
             continue
         per_account.append(

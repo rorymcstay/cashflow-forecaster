@@ -13,6 +13,7 @@ from app.web.pages import (  # noqa: F401
     cashflow,
     dashboard,
     investment_sim,
+    scenarios,
     statements,
     transactions,
     upcoming_expenses,
