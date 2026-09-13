@@ -26,6 +26,7 @@ MODULES = [
     "app.ui.dialogs",
     "app.ui.filter_proxy",
     "app.ui.investment_sim_screen",
+    "app.ui.scenario_screen",
     "app.ui.statements_screen",
     "app.ui.table_models",
     "app.ui.theme",

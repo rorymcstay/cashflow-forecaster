@@ -7,12 +7,53 @@ app/statement_import.py) rather than introducing a second definition of what
 counts as "recurring" or "the same merchant".
 """
 
+import calendar
 import datetime as dt
 
 from sqlalchemy.orm import Session
 
 from app.models import Statement, Transaction
 from app.statements import find_recurring_transactions, normalize_description
+
+# Quick date-range filters offered on the Transactions page (web + desktop),
+# in display order. "all"/"custom" are handled specially by
+# date_range_preset() rather than listed here as a fixed offset.
+DATE_RANGE_PRESETS: dict[str, str] = {
+    "all": "All time",
+    "this_month": "This month",
+    "last_30": "Last 30 days",
+    "last_3m": "Last 3 months",
+    "last_6m": "Last 6 months",
+    "ytd": "Year to date",
+    "custom": "Custom range",
+}
+
+
+def _months_ago(d: dt.date, months: int) -> dt.date:
+    total = d.year * 12 + (d.month - 1) - months
+    year, month = divmod(total, 12)
+    month += 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return dt.date(year, month, day)
+
+
+def date_range_preset(key: str, today: dt.date | None = None) -> tuple[dt.date | None, dt.date | None]:
+    """(start, end) for a named DATE_RANGE_PRESETS key, end always `today`.
+    Returns (None, None) for "all", "custom", or an unknown key — both mean
+    "no preset-derived bound", since "custom" defers to whatever dates the
+    user has picked directly."""
+    today = today or dt.date.today()
+    if key == "this_month":
+        return dt.date(today.year, today.month, 1), today
+    if key == "last_30":
+        return today - dt.timedelta(days=30), today
+    if key == "last_3m":
+        return _months_ago(today, 3), today
+    if key == "last_6m":
+        return _months_ago(today, 6), today
+    if key == "ytd":
+        return dt.date(today.year, 1, 1), today
+    return None, None
 
 
 def query_transactions(

@@ -50,11 +50,82 @@ def statements_page():
                 ui.upload(auto_upload=True, multiple=True).props("accept=.csv,.pdf").classes("max-w-md")
             )
 
-        ui.label("Pending Imports").classes("text-xl font-bold mt-2")
+        pending_entries: list[dict] = []
+
+        with ui.row().classes("items-center justify-between w-full mt-2"):
+            ui.label("Pending Imports").classes("text-xl font-bold")
+            import_all_btn = ui.button("Import All", on_click=lambda: import_all()).props("color=primary")
+            import_all_btn.set_visibility(False)
         pending_container = ui.column().classes("w-full gap-2")
         pending_placeholder = ui.label("Drop a file above to see it here before importing.").style(
             f"color: {TEXT_MUTED};"
         )
+
+        def refresh_pending_controls():
+            count = len(pending_entries)
+            import_all_btn.set_visibility(count > 0)
+            import_all_btn.set_text(f"Import All ({count})" if count else "Import All")
+
+        def run_import(entry: dict) -> tuple[bool, str]:
+            """Import one pending entry. Returns (ok, message) — used by both
+            the per-card Import button and Import All, so both report the
+            exact same success/historical/failure wording."""
+            account_id = entry["account_select"].value
+            if account_id is None:
+                return False, "Choose an account first."
+            account = session.get(Account, account_id)
+            if account is None:
+                return False, "Choose an account first."
+            period_start = dt.date.fromisoformat(entry["start_input"].value)
+            period_end = dt.date.fromisoformat(entry["end_input"].value)
+            is_reimport = (
+                session.query(Statement)
+                .filter_by(account_id=account.id, period_start=period_start, period_end=period_end)
+                .first()
+                is not None
+            )
+            balance_before = account.current_balance
+            try:
+                import_statement(
+                    session,
+                    account,
+                    entry["parsed"]["transactions"],
+                    period_start,
+                    period_end,
+                    source_note=entry["filename"],
+                    closing_balance=entry["parsed"].get("closing_balance"),
+                )
+            except ValueError as exc:
+                return False, str(exc)
+            verb = "Updated" if is_reimport else "Imported"
+            if account.current_balance == balance_before:
+                return True, (
+                    f"{verb} {entry['filename']} as historical — balance already known as of "
+                    f"{account.balance_as_of.strftime('%d %b %Y')}, so it wasn't changed."
+                )
+            return True, f"{verb} {entry['filename']} — balance now {_money(account.current_balance)}."
+
+        def import_all():
+            # Chronological order matters: the same-account balance math
+            # (front/historical/forward-extends) depends on each import
+            # seeing the account's balance_as_of as it would after every
+            # earlier-dated statement has already landed.
+            entries = sorted(pending_entries, key=lambda e: dt.date.fromisoformat(e["start_input"].value))
+            if not entries:
+                return
+            results = [(entry["filename"], *run_import(entry)) for entry in entries]
+            for entry, (_filename, ok, _msg) in zip(entries, results, strict=True):
+                if ok:
+                    entry["discard"]()
+            refresh_statements()
+            refresh_suggestions()
+            refresh_gaps()
+            successes = sum(1 for _, ok, _ in results if ok)
+            failures = [(fn, msg) for fn, ok, msg in results if not ok]
+            summary = f"Imported {successes} of {len(results)} statement(s)."
+            if failures:
+                summary += " Not imported: " + "; ".join(f"{fn} ({msg})" for fn, msg in failures)
+            ui.notify(summary, type="warning" if failures else "positive", multi_line=True)
 
         async def handle_upload(e: events.UploadEventArguments):
             tmp_path = Path(tempfile.gettempdir()) / f"upload_{uuid.uuid4().hex}_{e.file.name}"
@@ -157,56 +228,35 @@ def statements_page():
                     ui.button("Discard", on_click=lambda: discard()).props("flat")
                     ui.button("Import", on_click=lambda: do_import()).props("color=primary")
 
+            entry = {
+                "filename": filename,
+                "parsed": parsed,
+                "account_select": account_select,
+                "start_input": start_input,
+                "end_input": end_input,
+                "card": card,
+            }
+
             def discard():
                 pending_container.remove(card)
+                if entry in pending_entries:
+                    pending_entries.remove(entry)
+                refresh_pending_controls()
+
+            entry["discard"] = discard
+            pending_entries.append(entry)
+            refresh_pending_controls()
 
             def do_import():
-                account_id = account_select.value
-                if account_id is None:
-                    ui.notify("Choose an account first.", type="negative")
+                ok, msg = run_import(entry)
+                if not ok:
+                    ui.notify(msg, type="negative")
                     return
-                account = session.get(Account, account_id)
-                if account is None:
-                    ui.notify("Choose an account first.", type="negative")
-                    return
-                period_start = dt.date.fromisoformat(start_input.value)
-                period_end = dt.date.fromisoformat(end_input.value)
-                is_reimport = (
-                    session.query(Statement)
-                    .filter_by(account_id=account.id, period_start=period_start, period_end=period_end)
-                    .first()
-                    is not None
-                )
-                balance_before = account.current_balance
-                try:
-                    import_statement(
-                        session,
-                        account,
-                        parsed["transactions"],
-                        period_start,
-                        period_end,
-                        source_note=filename,
-                        closing_balance=parsed.get("closing_balance"),
-                    )
-                except ValueError as exc:
-                    ui.notify(str(exc), type="negative")
-                    return
-                pending_container.remove(card)
+                discard()
                 refresh_statements()
                 refresh_suggestions()
                 refresh_gaps()
-                verb = "Updated" if is_reimport else "Imported"
-                if account.current_balance == balance_before:
-                    ui.notify(
-                        f"{verb} {filename} as historical — balance already known as of "
-                        f"{account.balance_as_of.strftime('%d %b %Y')}, so it wasn't changed.",
-                        type="positive",
-                    )
-                else:
-                    ui.notify(
-                        f"{verb} {filename} — balance now {_money(account.current_balance)}.",
-                        type="positive",
-                    )
+                ui.notify(msg, type="positive")
 
         ui.label("Imported Statements").classes("text-xl font-bold mt-2")
         statements_table = ui.table(

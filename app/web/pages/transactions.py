@@ -5,6 +5,7 @@ the selected rows, and a detail pane to the right of the table for
 reclassifying a transaction and exploring similar/recurring ones by merchant.
 """
 
+import datetime as dt
 import itertools
 
 from nicegui import ui
@@ -13,12 +14,16 @@ from app.models import Account, Category, Transaction
 from app.seed import get_or_create_category
 from app.statement_import import UNCATEGORIZED, generate_suggestions, match_budget_item
 from app.transactions import (
+    DATE_RANGE_PRESETS,
+    date_range_preset,
     merchant_key,
     query_transactions,
     recurring_groups_by_merchant,
     similar_transactions,
 )
 from app.web.layout import SUCCESS, TEXT_MUTED, WARNING, get_page_session, page_shell
+
+_RANGE_OPTIONS = {k: v for k, v in DATE_RANGE_PRESETS.items() if k != "custom"}
 
 GROUP_FIELDS = {
     "None": None,
@@ -130,6 +135,11 @@ def transactions_page():
             group_select = ui.select(list(GROUP_FIELDS), label="Group by", value="None")
             search_input = ui.input("Search").props("debounce=300 clearable")
 
+        with ui.row().classes("items-center gap-4 flex-wrap w-full"):
+            range_select = ui.select(_RANGE_OPTIONS, label="Date range", value="all").classes("min-w-[160px]")
+            from_input = ui.input("From").props("type=date").classes("w-40")
+            to_input = ui.input("To").props("type=date").classes("w-40")
+
         with ui.row().classes("w-full gap-4 items-start"):
             with ui.column().classes("flex-1 gap-1"):
                 grid = (
@@ -222,11 +232,21 @@ def transactions_page():
 
         def reload_rows():
             selected_account_ids = account_select.value or None
-            displayed = query_transactions(session, account_ids=selected_account_ids)
+            start_date = dt.date.fromisoformat(from_input.value) if from_input.value else None
+            end_date = dt.date.fromisoformat(to_input.value) if to_input.value else None
+            displayed = query_transactions(
+                session, account_ids=selected_account_ids, start_date=start_date, end_date=end_date
+            )
             rows = [_row_dict(t, recurring_groups) for t in displayed]
             grid.options["rowData"] = _build_grid_rows(rows, group_select.value)
             grid.update()
             selection_label.set_text("No rows selected")
+
+        def apply_range_preset():
+            start, end = date_range_preset(range_select.value)
+            from_input.value = start.isoformat() if start else None
+            to_input.value = end.isoformat() if end else None
+            reload_rows()
 
         async def handle_selection_changed():
             selected = await grid.get_selected_rows()
@@ -331,5 +351,8 @@ def transactions_page():
         search_input.on_value_change(
             lambda e: grid.run_grid_method("setGridOption", "quickFilterText", e.value)
         )
+        range_select.on_value_change(lambda e: apply_range_preset())
+        from_input.on_value_change(lambda e: reload_rows())
+        to_input.on_value_change(lambda e: reload_rows())
 
         reload_rows()

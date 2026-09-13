@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -34,7 +35,7 @@ from app.statement_import import (
 from app.statements import extract_csv_transactions
 from app.ui import theme
 from app.ui.dialogs import TransactionCategoryDialog
-from app.ui.widgets import AccountMultiSelect
+from app.ui.widgets import AccountMultiSelect, CollapsibleSection
 
 SECTION_BG = QColor(theme.SECTION_BG)
 TOTAL_BG = QColor(theme.TOTAL_BG)
@@ -74,21 +75,51 @@ class StatementsScreen(QWidget):
         self.session = session
         self.on_change = on_change
         self._selected_statement: Statement | None = None
+        self._pending_entries: list[dict] = []
         self.setAcceptDrops(True)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<h2>Statements</h2>"))
+        outer_layout = QVBoxLayout(self)
+        outer_layout.addWidget(QLabel("<h2>Statements</h2>"))
 
-        layout.addWidget(self._build_import_panel())
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        scroll.setWidget(inner)
+        outer_layout.addWidget(scroll, stretch=1)
 
-        layout.addWidget(QLabel("<b>Pending Imports</b>"))
+        self.import_section = CollapsibleSection("Import Statements", expanded=True)
+        self.import_section.content_layout.addWidget(self._build_import_panel())
+        layout.addWidget(self.import_section)
+
+        self.pending_section = CollapsibleSection("Pending Imports", expanded=True)
+        pending_header_row = QHBoxLayout()
         self.pending_placeholder = QLabel("Drop a file above to see it here before importing.")
         self.pending_placeholder.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        layout.addWidget(self.pending_placeholder)
-        self.pending_layout = QVBoxLayout()
-        layout.addLayout(self.pending_layout)
+        pending_header_row.addWidget(self.pending_placeholder, stretch=1)
+        self.import_all_btn = QPushButton("Import All")
+        self.import_all_btn.setObjectName("primaryButton")
+        self.import_all_btn.setEnabled(False)
+        self.import_all_btn.clicked.connect(self._import_all)
+        pending_header_row.addWidget(self.import_all_btn)
+        self.pending_section.content_layout.addLayout(pending_header_row)
 
-        layout.addWidget(QLabel("<b>Imported Statements</b>"))
+        # Dropping several files at once can produce more cards than fit on
+        # screen — without its own scroll area, the ones below the fold were
+        # simply unreachable (no Import/Discard button to click).
+        pending_scroll = QScrollArea()
+        pending_scroll.setWidgetResizable(True)
+        pending_scroll.setMaximumHeight(360)
+        pending_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        pending_inner = QWidget()
+        self.pending_layout = QVBoxLayout(pending_inner)
+        self.pending_layout.addStretch()
+        pending_scroll.setWidget(pending_inner)
+        self.pending_section.content_layout.addWidget(pending_scroll)
+        layout.addWidget(self.pending_section)
+
+        self.imported_section = CollapsibleSection("Imported Statements", expanded=True)
         self.statements_table = QTableWidget()
         self.statements_table.setColumnCount(5)
         self.statements_table.setHorizontalHeaderLabels(
@@ -101,18 +132,29 @@ class StatementsScreen(QWidget):
         self.statements_table.verticalHeader().setVisible(False)
         self.statements_table.setMaximumHeight(160)
         self.statements_table.itemSelectionChanged.connect(self._on_statement_selected)
-        layout.addWidget(self.statements_table)
+        self.imported_section.content_layout.addWidget(self.statements_table)
 
         delete_row = QHBoxLayout()
         delete_row.addStretch()
         delete_statement_btn = QPushButton("Delete Statement")
         delete_statement_btn.clicked.connect(self._delete_statement)
         delete_row.addWidget(delete_statement_btn)
-        layout.addLayout(delete_row)
+        self.imported_section.content_layout.addLayout(delete_row)
+        layout.addWidget(self.imported_section)
 
-        layout.addWidget(self._build_detail_panel())
-        layout.addWidget(self._build_suggestions_panel())
-        layout.addWidget(self._build_gaps_panel())
+        self.detail_section = CollapsibleSection("Budget vs Actual / Transactions", expanded=False)
+        self.detail_section.content_layout.addWidget(self._build_detail_panel())
+        layout.addWidget(self.detail_section)
+
+        self.suggestions_section = CollapsibleSection("Budget Suggestions", expanded=False)
+        self.suggestions_section.content_layout.addWidget(self._build_suggestions_panel())
+        layout.addWidget(self.suggestions_section)
+
+        self.gaps_section = CollapsibleSection("Missing Statements", expanded=False)
+        self.gaps_section.content_layout.addWidget(self._build_gaps_panel())
+        layout.addWidget(self.gaps_section)
+
+        layout.addStretch()
 
         self.reload_accounts()
         self.refresh()
@@ -206,8 +248,82 @@ class StatementsScreen(QWidget):
 
     # -- pending imports -------------------------------------------------
 
+    def _pending_count(self) -> int:
+        return self.pending_layout.count() - 1  # exclude the trailing stretch
+
+    def _refresh_pending_title(self) -> None:
+        count = self._pending_count()
+        self.pending_section.set_title(f"Pending Imports ({count})" if count else "Pending Imports")
+        self.import_all_btn.setText(f"Import All ({count})" if count else "Import All")
+        self.import_all_btn.setEnabled(count > 0)
+
+    def _run_pending_import(self, entry: dict) -> tuple[bool, str, str]:
+        """Import one pending entry. Returns (ok, dialog_title, message) —
+        used by both the per-card Import button and Import All, so both
+        report the exact same success/historical/failure wording."""
+        account_id = entry["account_combo"].currentData()
+        if account_id is None:
+            return False, "No account", "Choose an account first."
+        account = self.session.get(Account, account_id)
+        if account is None:
+            return False, "No account", "Choose an account first."
+        period_start = _to_pydate(entry["start_edit"].date())
+        period_end = _to_pydate(entry["end_edit"].date())
+        is_reimport = (
+            self.session.query(Statement)
+            .filter_by(account_id=account.id, period_start=period_start, period_end=period_end)
+            .first()
+            is not None
+        )
+        balance_before = account.current_balance
+        try:
+            import_statement(
+                self.session,
+                account,
+                entry["parsed"]["transactions"],
+                period_start,
+                period_end,
+                source_note=entry["filename"],
+                closing_balance=entry["parsed"].get("closing_balance"),
+            )
+        except ValueError as exc:
+            return False, "Couldn't import statement", str(exc)
+        verb = "Updated" if is_reimport else "Imported"
+        if account.current_balance == balance_before:
+            historical_msg = (
+                f"{verb} {entry['filename']}. Balance was already known as of "
+                f"{account.balance_as_of.strftime('%d %b %Y')}, so it wasn't changed."
+            )
+            return True, f"{verb} as historical", historical_msg
+        return True, verb, f"{verb} {entry['filename']}. Balance now £{account.current_balance:,.2f}."
+
+    def _import_all(self):
+        # Chronological order matters: the same-account balance math
+        # (front/historical/forward-extends) depends on each import seeing
+        # the account's balance_as_of as it would after every earlier-dated
+        # statement in the batch has already landed.
+        entries = sorted(self._pending_entries, key=lambda e: _to_pydate(e["start_edit"].date()))
+        if not entries:
+            return
+        results = []
+        for entry in entries:
+            ok, _title, msg = self._run_pending_import(entry)
+            results.append((entry["filename"], ok, msg))
+            if ok:
+                entry["discard"]()
+        self._notify_change()
+        successes = sum(1 for _, ok, _ in results if ok)
+        lines = [f"Imported {successes} of {len(results)} statement(s)."]
+        failures = [(fn, msg) for fn, ok, msg in results if not ok]
+        if failures:
+            lines.append("")
+            lines.append("Not imported:")
+            lines.extend(f"• {fn}: {msg}" for fn, msg in failures)
+        QMessageBox.information(self, "Import All", "\n".join(lines))
+
     def _add_pending_card(self, filename: str, parsed: dict):
         self.pending_placeholder.setVisible(False)
+        self.pending_section.set_expanded(True)
         accounts = self.session.query(Account).order_by(Account.name).all()
         hint = parsed.get("account_hint")
         default_account_id = detect_account_for_hint(accounts, hint)
@@ -295,65 +411,45 @@ class StatementsScreen(QWidget):
         btn_row.addWidget(import_btn)
         outer.addLayout(btn_row)
 
-        self.pending_layout.addWidget(card)
+        # Insert before the trailing stretch (always the last item) so new
+        # cards stack from the top instead of ending up after it.
+        self.pending_layout.insertWidget(self.pending_layout.count() - 1, card)
+        self._refresh_pending_title()
+
+        entry = {
+            "filename": filename,
+            "parsed": parsed,
+            "account_combo": account_combo,
+            "start_edit": start_edit,
+            "end_edit": end_edit,
+            "card": card,
+        }
 
         def discard():
+            if entry in self._pending_entries:
+                self._pending_entries.remove(entry)
             self.pending_layout.removeWidget(card)
             # hide() immediately — removeWidget() alone leaves the widget
             # visible at its old position (just unmanaged) until deleteLater()'s
             # deferred deletion actually runs on the next event loop turn.
             card.hide()
             card.deleteLater()
-            if self.pending_layout.count() == 0:
+            if self.pending_layout.count() == 1:  # nothing left but the trailing stretch
                 self.pending_placeholder.setVisible(True)
+            self._refresh_pending_title()
+
+        entry["discard"] = discard
+        self._pending_entries.append(entry)
+        self._refresh_pending_title()
 
         def do_import():
-            account_id = account_combo.currentData()
-            if account_id is None:
-                QMessageBox.warning(self, "No account", "Choose an account first.")
-                return
-            account = self.session.get(Account, account_id)
-            if account is None:
-                QMessageBox.warning(self, "No account", "Choose an account first.")
-                return
-            period_start = _to_pydate(start_edit.date())
-            period_end = _to_pydate(end_edit.date())
-            is_reimport = (
-                self.session.query(Statement)
-                .filter_by(account_id=account.id, period_start=period_start, period_end=period_end)
-                .first()
-                is not None
-            )
-            balance_before = account.current_balance
-            try:
-                import_statement(
-                    self.session,
-                    account,
-                    parsed["transactions"],
-                    period_start,
-                    period_end,
-                    source_note=filename,
-                    closing_balance=parsed.get("closing_balance"),
-                )
-            except ValueError as exc:
-                QMessageBox.warning(self, "Couldn't import statement", str(exc))
+            ok, title, msg = self._run_pending_import(entry)
+            if not ok:
+                QMessageBox.warning(self, title, msg)
                 return
             discard()
             self._notify_change()
-            verb = "Updated" if is_reimport else "Imported"
-            if account.current_balance == balance_before:
-                QMessageBox.information(
-                    self,
-                    f"{verb} as historical",
-                    f"{verb} {filename}. Balance was already known as of "
-                    f"{account.balance_as_of.strftime('%d %b %Y')}, so it wasn't changed.",
-                )
-            else:
-                QMessageBox.information(
-                    self,
-                    f"{verb}",
-                    f"{verb} {filename}. Balance now £{account.current_balance:,.2f}.",
-                )
+            QMessageBox.information(self, title, msg)
 
         discard_btn.clicked.connect(discard)
         import_btn.clicked.connect(do_import)
@@ -386,6 +482,7 @@ class StatementsScreen(QWidget):
             self.statements_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, s.id)
         for col in range(4):
             self.statements_table.resizeColumnToContents(col)
+        self.imported_section.set_title(f"Imported Statements ({len(statements)})")
 
     def _select_statement_row(self, statement_id: int):
         for row in range(self.statements_table.rowCount()):
@@ -491,6 +588,7 @@ class StatementsScreen(QWidget):
         self.transactions_table.setRowCount(0)
         if statement is None:
             return
+        self.detail_section.set_expanded(True)
 
         report = budget_vs_actual_report(self.session, statement)
         for row in report["by_category"]:
@@ -534,7 +632,6 @@ class StatementsScreen(QWidget):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel("<b>Budget Suggestions</b>"))
 
         self.suggestions_table = QTableWidget()
         self.suggestions_table.setColumnCount(7)
@@ -583,6 +680,7 @@ class StatementsScreen(QWidget):
             self.suggestions_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, sg.id)
         for col in range(6):
             self.suggestions_table.resizeColumnToContents(col)
+        self.suggestions_section.set_title(f"Budget Suggestions ({len(suggestions)})")
 
     def _selected_suggestion(self) -> BudgetSuggestion | None:
         row = self.suggestions_table.currentRow()
@@ -613,7 +711,6 @@ class StatementsScreen(QWidget):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel("<b>Missing Statements</b>"))
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Accounts:"))
@@ -670,6 +767,9 @@ class StatementsScreen(QWidget):
             label = QLabel("No gaps — every selected account has statement coverage across this range.")
             label.setStyleSheet(f"color: {theme.SUCCESS};")
             self.gaps_container.addWidget(label)
+        else:
+            self.gaps_section.set_expanded(True)
+        self.gaps_section.set_title("Missing Statements ⚠" if found_any else "Missing Statements")
 
     # -- shared ------------------------------------------------------------
 

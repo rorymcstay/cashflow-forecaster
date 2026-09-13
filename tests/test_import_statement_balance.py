@@ -209,16 +209,14 @@ def test_reimporting_historical_statement_upserts_without_touching_balance(sessi
     assert [t.description for t in statement.transactions] == ["corrected"]
 
 
-def test_reimport_that_would_straddle_is_trimmed_too(session):
+def test_reimport_of_a_never_before_seen_period_that_straddles_is_trimmed(session):
     account = Account(name="Joint Monzo", current_balance=0.0, balance_as_of=dt.date(2026, 1, 1))
     session.add(account)
     session.commit()
     import_statement(
-        session, account, [_tx("2026-01-10", "x", 1.0)], dt.date(2026, 1, 1), dt.date(2026, 1, 31)
+        session, account, [_tx("2026-01-10", "x", 1.0)], dt.date(2026, 1, 1), dt.date(2026, 1, 15)
     )
-    # Someone rewinds the known date to mid-January by other means.
-    account.balance_as_of = dt.date(2026, 1, 15)
-    session.commit()
+    # A later, differently-bounded rolling export straddles the known date.
 
     statement = import_statement(
         session,
@@ -231,6 +229,44 @@ def test_reimport_that_would_straddle_is_trimmed_too(session):
     assert [t.description for t in statement.transactions] == ["y"]
     assert statement.period_start == dt.date(2026, 1, 16)
     assert account.current_balance == 51.0  # 1.0 (first import's net) + 50.0 (trimmed second import's net)
+    assert account.balance_as_of == dt.date(2026, 1, 31)
+    assert session.query(Statement).count() == 2  # the original Jan 1-15 statement, plus the trimmed tail
+
+
+def test_reimporting_the_same_exact_period_never_creates_a_second_statement(session):
+    """Regression: if balance_as_of ends up sitting strictly inside an
+    already-imported statement's period (e.g. a later manual correction),
+    re-uploading that exact same file used to be misread as a "straddle",
+    re-deriving a different period and abandoning the original statement in
+    place — leaving two overlapping rows both claiming January. Re-importing
+    the exact period that's already on file must always upsert, never spawn
+    a duplicate, however balance_as_of has since moved."""
+    account = Account(name="Joint Monzo", current_balance=0.0, balance_as_of=dt.date(2026, 1, 1))
+    session.add(account)
+    session.commit()
+    import_statement(
+        session, account, [_tx("2026-01-10", "x", 1.0)], dt.date(2026, 1, 1), dt.date(2026, 1, 31)
+    )
+    assert account.current_balance == 1.0
+    assert account.balance_as_of == dt.date(2026, 1, 31)
+
+    # balance_as_of moves to sit strictly inside the already-imported period.
+    account.balance_as_of = dt.date(2026, 1, 15)
+    session.commit()
+
+    statement = import_statement(
+        session,
+        account,
+        [_tx("2026-01-10", "x", 1.0), _tx("2026-01-20", "y", 50.0)],
+        dt.date(2026, 1, 1),
+        dt.date(2026, 1, 31),
+    )
+
+    assert session.query(Statement).count() == 1
+    assert [t.description for t in statement.transactions] == ["x", "y"]
+    assert statement.period_start == dt.date(2026, 1, 1)
+    assert statement.period_end == dt.date(2026, 1, 31)
+    assert account.current_balance == 51.0  # old net (1.0) reversed, new net (51.0) applied
     assert account.balance_as_of == dt.date(2026, 1, 31)
 
 

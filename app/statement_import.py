@@ -207,7 +207,16 @@ def import_statement(
     is_historical = period_end <= account.balance_as_of and not is_front_statement
     straddles = not is_historical and not is_front_statement and period_start < account.balance_as_of
 
-    if straddles:
+    # Only trim-and-re-anchor when this period genuinely hasn't been imported
+    # before. If `existing` was already found by its exact bounds, this is a
+    # re-upload of an already-known statement — re-deriving a new period here
+    # would abandon `existing` in place (still holding its old transactions)
+    # and create a second, overlapping Statement row instead of upserting it.
+    # That was the actual source of "reuploading causes duplicates": e.g. a
+    # statement imported as a forward extension, then balance_as_of later
+    # moved to sit strictly inside its period (a subsequent correction), made
+    # every re-upload of that same file spawn a duplicate.
+    if straddles and existing is None:
         cutoff = account.balance_as_of
         transactions = [t for t in transactions if _transaction_date(t) > cutoff]
         if not transactions:
@@ -269,13 +278,16 @@ def import_statement(
 
     if is_historical:
         pass  # transactions-only — current_balance already reflects this period
-    elif is_front_statement:
+    else:
+        # Same formula for the front statement and a plain forward extension:
+        # old_net is 0.0 whenever `existing` wasn't found, so this reduces to
+        # `current_balance + net` in that case exactly as before. When
+        # `existing` WAS found (a re-upload of an already-known period whose
+        # net was previously applied), old_net must always be reversed first
+        # — regardless of whether it's literally today's front statement —
+        # otherwise re-importing double-counts its previous contribution.
         account.current_balance = (
             closing_balance if closing_balance is not None else account.current_balance + (net - old_net)
-        )
-    else:
-        account.current_balance = (
-            closing_balance if closing_balance is not None else account.current_balance + net
         )
         account.balance_as_of = period_end
 

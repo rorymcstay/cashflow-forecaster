@@ -5,6 +5,62 @@ from app.models import Account
 from app.ui import theme
 
 
+class CollapsibleSection(QWidget):
+    """A titled panel that expands/collapses on clicking its header — lets a
+    screen with many sections show only the ones the user actually wants to
+    look at right now, instead of everything stacked and squeezed at once.
+
+    Use `.content_layout` to build the panel's body, and `set_title()` to
+    update the header text later (e.g. to show a live count)."""
+
+    def __init__(self, title: str, expanded: bool = True, parent=None):
+        super().__init__(parent)
+        self._title = title
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._toggle_btn = QPushButton()
+        self._toggle_btn.setCheckable(True)
+        self._toggle_btn.setChecked(expanded)
+        self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle_btn.setStyleSheet(
+            "QPushButton { text-align: left; padding: 6px 2px; border: none; "
+            f"background: transparent; font-weight: bold; font-size: 14px; color: {theme.TEXT}; }}"
+            f"QPushButton:hover {{ color: {theme.ACCENT}; }}"
+        )
+        self._toggle_btn.clicked.connect(self._on_toggled)
+        outer.addWidget(self._toggle_btn)
+
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(4, 4, 0, 8)
+        outer.addWidget(self.content)
+
+        self.content.setVisible(expanded)
+        self._update_button_text()
+
+    def _update_button_text(self) -> None:
+        arrow = "▾" if self._toggle_btn.isChecked() else "▸"
+        self._toggle_btn.setText(f"{arrow}  {self._title}")
+
+    def _on_toggled(self) -> None:
+        self.content.setVisible(self._toggle_btn.isChecked())
+        self._update_button_text()
+
+    def set_title(self, title: str) -> None:
+        self._title = title
+        self._update_button_text()
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._toggle_btn.setChecked(expanded)
+        self._on_toggled()
+
+    def is_expanded(self) -> bool:
+        return self._toggle_btn.isChecked()
+
+
 class AccountMultiSelect(QPushButton):
     """Button that opens a checkbox-list popup for selecting zero or more
     accounts. `checked_ids()` always returns the literal list of checked ids

@@ -21,6 +21,7 @@ from app.ui.budget_view_screen import BudgetViewScreen
 from app.ui.cashflow_screen import CashflowForecastScreen
 from app.ui.dashboard_screen import DashboardScreen
 from app.ui.investment_sim_screen import InvestmentSimScreen
+from app.ui.scenario_screen import ScenarioScreen
 from app.ui.statements_screen import StatementsScreen
 from app.ui.transactions_screen import TransactionsScreen
 from app.ui.upcoming_expenses_screen import UpcomingExpensesScreen
@@ -82,11 +83,13 @@ class MainWindow(QMainWindow):
         self.transactions_screen = TransactionsScreen(self.session)
         self.budget_view_screen = BudgetViewScreen(self.session)
         self.cashflow_screen = CashflowForecastScreen(self.session)
+        self.scenario_screen = ScenarioScreen(self.session)
         self.investment_sim_screen = InvestmentSimScreen(self.session)
 
         self.tabs.addTab(self.dashboard_screen, "Dashboard")
         self.tabs.addTab(self.accounts_screen, "Accounts")
         self.tabs.addTab(self.cashflow_screen, "Cash Flow Forecast")
+        self.tabs.addTab(self.scenario_screen, "Scenarios")
         self.tabs.addTab(self.budget_items_screen, "Budget Items")
         self.tabs.addTab(self.upcoming_screen, "Upcoming Expenses")
         self.tabs.addTab(self.statements_screen, "Statements")
@@ -107,6 +110,7 @@ class MainWindow(QMainWindow):
         self.budget_view_screen.refresh()
         self.cashflow_screen.reload_accounts()
         self.cashflow_screen.refresh()
+        self.scenario_screen.reload_accounts()
         self.investment_sim_screen.reload_accounts()
 
     def on_tab_changed(self, index: int):
@@ -126,6 +130,8 @@ class MainWindow(QMainWindow):
         elif widget is self.cashflow_screen:
             self.cashflow_screen.reload_accounts()
             self.cashflow_screen.refresh()
+        elif widget is self.scenario_screen:
+            self.scenario_screen.reload_accounts()
         elif widget is self.investment_sim_screen:
             self.investment_sim_screen.reload_accounts()
 
