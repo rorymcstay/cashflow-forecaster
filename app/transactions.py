@@ -9,11 +9,20 @@ counts as "recurring" or "the same merchant".
 
 import calendar
 import datetime as dt
+from collections import defaultdict
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models import Statement, Transaction
 from app.statements import find_recurring_transactions, normalize_description
+
+UNCATEGORIZED = "Uncategorized"
+
+# No real Category row ever has this id (autoincrement starts at 1) — used as
+# a pseudo-category id so the category filter can include/exclude
+# transactions with no category at all, not just named ones.
+UNCATEGORIZED_ID = -1
 
 # Quick date-range filters offered on the Transactions page (web + desktop),
 # in display order. "all"/"custom" are handled specially by
@@ -66,12 +75,24 @@ def query_transactions(
     """Transactions across every statement, optionally narrowed by account,
     category, or date range. Free-text search and column-level filtering are
     left to the table widget client-side — this only narrows what gets
-    loaded into it in the first place."""
+    loaded into it in the first place.
+
+    `category_ids` may include UNCATEGORIZED_ID to match transactions with no
+    category at all, alongside or instead of real category ids."""
     query = session.query(Transaction).join(Statement)
     if account_ids:
         query = query.filter(Statement.account_id.in_(account_ids))
     if category_ids:
-        query = query.filter(Transaction.category_id.in_(category_ids))
+        include_uncategorized = UNCATEGORIZED_ID in category_ids
+        real_ids = [c for c in category_ids if c != UNCATEGORIZED_ID]
+        if include_uncategorized and real_ids:
+            query = query.filter(
+                or_(Transaction.category_id.in_(real_ids), Transaction.category_id.is_(None))
+            )
+        elif include_uncategorized:
+            query = query.filter(Transaction.category_id.is_(None))
+        else:
+            query = query.filter(Transaction.category_id.in_(real_ids))
     if start_date:
         query = query.filter(Transaction.date >= start_date)
     if end_date:
@@ -108,3 +129,84 @@ def similar_transactions(
     matches = [t for t in pool if t.id != transaction.id and merchant_key(t) == key]
     matches.sort(key=lambda t: t.date, reverse=True)
     return matches[:limit]
+
+
+def spend_breakdown(transactions: list[Transaction], top_merchants: int = 10) -> dict:
+    """Spend-analysis summary over exactly the given transactions — callers
+    pass whatever's currently filtered/displayed (by account, date range,
+    etc.) so the summary always matches what's on screen.
+
+    Category and merchant breakdowns only consider expenses (amount < 0),
+    reported as positive magnitudes, since "where did the money go" is the
+    usual question; income is only used for the income/net totals and the
+    monthly trend."""
+    total_income = sum(t.amount for t in transactions if t.amount > 0)
+    total_expense = -sum(t.amount for t in transactions if t.amount < 0)
+
+    category_totals: dict[str, float] = defaultdict(float)
+    merchant_totals: dict[str, dict] = defaultdict(lambda: {"description": "", "count": 0, "amount": 0.0})
+    month_totals: dict[str, dict] = defaultdict(lambda: {"income": 0.0, "expense": 0.0})
+
+    for t in transactions:
+        month_key = t.date.strftime("%Y-%m")
+        if t.amount > 0:
+            month_totals[month_key]["income"] += t.amount
+            continue
+        amount = -t.amount
+        month_totals[month_key]["expense"] += amount
+        category_name = t.category.name if t.category else UNCATEGORIZED
+        category_totals[category_name] += amount
+        key = merchant_key(t)
+        if key:
+            entry = merchant_totals[key]
+            entry["description"] = t.description
+            entry["count"] += 1
+            entry["amount"] += amount
+
+    by_category = sorted(
+        (
+            {
+                "category": name,
+                "amount": round(amount, 2),
+                "pct": round(amount / total_expense * 100, 1) if total_expense else 0.0,
+            }
+            for name, amount in category_totals.items()
+        ),
+        key=lambda r: r["amount"],
+        reverse=True,
+    )
+
+    top_merchant_rows = sorted(
+        (
+            {"merchant": v["description"], "count": v["count"], "amount": round(v["amount"], 2)}
+            for v in merchant_totals.values()
+        ),
+        key=lambda r: r["amount"],
+        reverse=True,
+    )[:top_merchants]
+
+    by_month = [
+        {
+            "month": key,
+            "month_label": dt.date.fromisoformat(f"{key}-01").strftime("%b %Y"),
+            "income": round(v["income"], 2),
+            "expense": round(v["expense"], 2),
+            "net": round(v["income"] - v["expense"], 2),
+        }
+        for key, v in sorted(month_totals.items())
+    ]
+
+    months_spanned = len(month_totals) or 1
+
+    return {
+        "transaction_count": len(transactions),
+        "total_income": round(total_income, 2),
+        "total_expense": round(total_expense, 2),
+        "net": round(total_income - total_expense, 2),
+        "months_spanned": months_spanned,
+        "avg_monthly_income": round(total_income / months_spanned, 2),
+        "avg_monthly_expense": round(total_expense / months_spanned, 2),
+        "by_category": by_category,
+        "top_merchants": top_merchant_rows,
+        "by_month": by_month,
+    }

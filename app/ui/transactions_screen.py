@@ -1,6 +1,9 @@
 import datetime as dt
+from types import SimpleNamespace
 
+from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QValueAxis
 from PySide6.QtCore import QDate, Qt
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -14,6 +17,9 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QTableView,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -24,11 +30,13 @@ from app.seed import get_or_create_category
 from app.statement_import import UNCATEGORIZED, generate_suggestions, match_budget_item
 from app.transactions import (
     DATE_RANGE_PRESETS,
+    UNCATEGORIZED_ID,
     date_range_preset,
     merchant_key,
     query_transactions,
     recurring_groups_by_merchant,
     similar_transactions,
+    spend_breakdown,
 )
 from app.ui import theme
 from app.ui.filter_proxy import GroupFilterProxyModel, PageFilterProxyModel
@@ -40,6 +48,7 @@ from app.ui.widgets import AccountMultiSelect
 _GROUP_OPTIONS = [("No grouping", -1), ("Category", 3), ("Account", 1), ("Merchant", 4), ("Month", 5)]
 
 _PAGE_SIZES = [50, 100, 250, 500]
+_CATEGORY_COLORS = ["#5B8DEF", "#34D399", "#F2555C", "#F2B705", "#B45BEF", "#05C7F2", "#F2905B", "#8D95A3"]
 
 
 def _to_pydate(qd: QDate) -> dt.date:
@@ -75,6 +84,12 @@ class TransactionsScreen(QWidget):
         self.account_select = AccountMultiSelect(self)
         toolbar.addWidget(self.account_select)
 
+        toolbar.addWidget(QLabel("Categories:"))
+        self.category_select = AccountMultiSelect(
+            self, noun="category", noun_plural="categories", all_selected_label="All Categories"
+        )
+        toolbar.addWidget(self.category_select)
+
         toolbar.addWidget(QLabel("Filter:"))
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Type to filter…")
@@ -106,6 +121,14 @@ class TransactionsScreen(QWidget):
         range_row.addWidget(self.to_edit)
         range_row.addStretch()
         layout.addLayout(range_row)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, stretch=1)
+
+        table_tab = QWidget()
+        table_tab_layout = QVBoxLayout(table_tab)
+        table_tab_layout.setContentsMargins(0, 8, 0, 0)
+        self.tabs.addTab(table_tab, "Table")
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -181,10 +204,13 @@ class TransactionsScreen(QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([760, 320])
-        layout.addWidget(splitter, stretch=1)
+        table_tab_layout.addWidget(splitter)
+
+        self.tabs.addTab(self._build_summary_tab(), "Summary")
 
         self.table.selectionModel().selectionChanged.connect(self._update_selection_sum)
         self.account_select.selectionChanged.connect(self._reload_table)
+        self.category_select.selectionChanged.connect(self._reload_table)
         self.filter_edit.textChanged.connect(self._on_filter_text_changed)
         self.group_combo.currentIndexChanged.connect(self._on_group_changed)
         self.range_combo.currentIndexChanged.connect(self._on_range_preset_changed)
@@ -205,10 +231,184 @@ class TransactionsScreen(QWidget):
     def _amount_color(self, t: Transaction) -> str:
         return theme.WARNING if t.amount < 0 else theme.SUCCESS
 
+    # -- summary tab -----------------------------------------------------------
+
+    def _build_tile(self, title: str) -> tuple[QFrame, QLabel]:
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"background-color: {theme.SURFACE}; border: 1px solid {theme.BORDER}; border-radius: 8px;"
+        )
+        v = QVBoxLayout(frame)
+        title_label = QLabel(title)
+        title_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        value_label = QLabel("—")
+        value_label.setStyleSheet(f"color: {theme.TEXT}; font-size: 22px; font-weight: 700;")
+        v.addWidget(title_label)
+        v.addWidget(value_label)
+        return frame, value_label
+
+    def _build_chart_view(self, title: str) -> tuple[QChart, QChartView]:
+        chart = QChart()
+        chart.setTitle(title)
+        chart.setTitleBrush(QColor(theme.TEXT))
+        chart.setBackgroundBrush(QColor(theme.SURFACE))
+        chart.setBackgroundPen(QColor(theme.BORDER))
+        chart.legend().setLabelColor(QColor(theme.TEXT_MUTED))
+        chart_view = QChartView(chart)
+        chart_view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        chart_view.setMinimumHeight(320)
+        return chart, chart_view
+
+    def _style_axis(self, axis) -> None:
+        axis.setLabelsColor(QColor(theme.TEXT_MUTED))
+        axis.setGridLineColor(QColor(theme.BORDER))
+        axis.setLinePenColor(QColor(theme.BORDER))
+        if isinstance(axis, QBarCategoryAxis):
+            font = axis.labelsFont()
+            font.setPointSize(8)
+            axis.setLabelsFont(font)
+
+    def _build_summary_tab(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        scroll.setWidget(inner)
+
+        tiles_row = QHBoxLayout()
+        income_frame, self.income_tile = self._build_tile("Total Income")
+        expense_frame, self.expense_tile = self._build_tile("Total Expenses")
+        net_frame, self.net_tile = self._build_tile("Net")
+        avg_frame, self.avg_expense_tile = self._build_tile("Avg Monthly Spend")
+        count_frame, self.count_tile = self._build_tile("Transactions")
+        for frame in (income_frame, expense_frame, net_frame, avg_frame, count_frame):
+            tiles_row.addWidget(frame)
+        layout.addLayout(tiles_row)
+
+        charts_row = QHBoxLayout()
+        self.category_chart, category_chart_view = self._build_chart_view("Spend by Category")
+        charts_row.addWidget(category_chart_view, stretch=1)
+
+        merchants_col = QVBoxLayout()
+        merchants_col.addWidget(QLabel("<b>Top Merchants</b>"))
+        self.merchants_table = QTableWidget()
+        self.merchants_table.setColumnCount(3)
+        self.merchants_table.setHorizontalHeaderLabels(["Merchant", "Count", "Total"])
+        self.merchants_table.horizontalHeader().setStretchLastSection(True)
+        self.merchants_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.merchants_table.verticalHeader().setVisible(False)
+        self.merchants_table.setMinimumHeight(280)
+        merchants_col.addWidget(self.merchants_table)
+        charts_row.addLayout(merchants_col, stretch=1)
+        layout.addLayout(charts_row)
+
+        self.monthly_chart, monthly_chart_view = self._build_chart_view("Income vs Expense by Month")
+        layout.addWidget(monthly_chart_view)
+
+        layout.addStretch()
+        return scroll
+
+    def _rebuild_category_chart(self, rows: list[dict]) -> None:
+        self.category_chart.removeAllSeries()
+        for axis in list(self.category_chart.axes()):
+            self.category_chart.removeAxis(axis)
+        if not rows:
+            return
+
+        bar_set = QBarSet("Spend")
+        bar_set.append([r["amount"] for r in rows])
+        series = QBarSeries()
+        series.append(bar_set)
+        series.setLabelsVisible(False)
+        for i in range(len(rows)):
+            bar_set.setColor(QColor(_CATEGORY_COLORS[i % len(_CATEGORY_COLORS)]))
+        self.category_chart.addSeries(series)
+
+        axis_x = QBarCategoryAxis()
+        axis_x.append([r["category"] for r in rows])
+        axis_x.setLabelsAngle(-45)
+        self._style_axis(axis_x)
+        self.category_chart.addAxis(axis_x, Qt.AlignmentFlag.AlignBottom)
+        series.attachAxis(axis_x)
+
+        axis_y = QValueAxis()
+        axis_y.setLabelFormat("£%.0f")
+        max_amount = max((r["amount"] for r in rows), default=0.0)
+        axis_y.setRange(0, max_amount * 1.15 if max_amount else 1)
+        self._style_axis(axis_y)
+        self.category_chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
+        series.attachAxis(axis_y)
+
+    def _rebuild_monthly_chart(self, rows: list[dict]) -> None:
+        self.monthly_chart.removeAllSeries()
+        for axis in list(self.monthly_chart.axes()):
+            self.monthly_chart.removeAxis(axis)
+        if not rows:
+            return
+
+        income_set = QBarSet("Income")
+        income_set.append([r["income"] for r in rows])
+        income_set.setColor(QColor(theme.SUCCESS))
+        expense_set = QBarSet("Expense")
+        expense_set.append([r["expense"] for r in rows])
+        expense_set.setColor(QColor(theme.WARNING))
+        series = QBarSeries()
+        series.append(income_set)
+        series.append(expense_set)
+        self.monthly_chart.addSeries(series)
+        self.monthly_chart.legend().setVisible(True)
+
+        axis_x = QBarCategoryAxis()
+        axis_x.append([r["month_label"] for r in rows])
+        axis_x.setLabelsAngle(-45)
+        self._style_axis(axis_x)
+        self.monthly_chart.addAxis(axis_x, Qt.AlignmentFlag.AlignBottom)
+        series.attachAxis(axis_x)
+
+        axis_y = QValueAxis()
+        axis_y.setLabelFormat("£%.0f")
+        max_amount = max((max(r["income"], r["expense"]) for r in rows), default=0.0)
+        axis_y.setRange(0, max_amount * 1.15 if max_amount else 1)
+        self._style_axis(axis_y)
+        self.monthly_chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
+        series.attachAxis(axis_y)
+
+    def _rebuild_merchants_table(self, rows: list[dict]) -> None:
+        self.merchants_table.setRowCount(0)
+        for r in rows:
+            row = self.merchants_table.rowCount()
+            self.merchants_table.insertRow(row)
+            self.merchants_table.setItem(row, 0, QTableWidgetItem(r["merchant"]))
+            count_item = QTableWidgetItem(str(r["count"]))
+            count_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.merchants_table.setItem(row, 1, count_item)
+            amount_item = QTableWidgetItem(f"£{r['amount']:,.2f}")
+            amount_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.merchants_table.setItem(row, 2, amount_item)
+        self.merchants_table.resizeColumnToContents(0)
+
+    def _refresh_summary(self, displayed: list[Transaction]) -> None:
+        breakdown = spend_breakdown(displayed)
+        self.income_tile.setText(f"£{breakdown['total_income']:,.2f}")
+        self.expense_tile.setText(f"£{breakdown['total_expense']:,.2f}")
+        self.net_tile.setText(f"£{breakdown['net']:,.2f}")
+        net_color = theme.SUCCESS if breakdown["net"] >= 0 else theme.WARNING
+        self.net_tile.setStyleSheet(f"color: {net_color}; font-size: 22px; font-weight: 700;")
+        self.avg_expense_tile.setText(f"£{breakdown['avg_monthly_expense']:,.2f}")
+        self.count_tile.setText(str(breakdown["transaction_count"]))
+
+        self._rebuild_category_chart(breakdown["by_category"][:10])
+        self._rebuild_monthly_chart(breakdown["by_month"])
+        self._rebuild_merchants_table(breakdown["top_merchants"])
+
     # -- data ----------------------------------------------------------------
 
     def reload_accounts(self):
         self.account_select.set_accounts(self.session.query(Account).order_by(Account.name).all())
+        categories: list = list(self.session.query(Category).order_by(Category.name).all())
+        categories.append(SimpleNamespace(id=UNCATEGORIZED_ID, name="Uncategorized"))
+        self.category_select.set_accounts(categories)
 
     def refresh(self):
         self._pool = query_transactions(self.session)
@@ -225,9 +425,14 @@ class TransactionsScreen(QWidget):
 
     def _reload_table(self):
         account_ids = self.account_select.checked_ids() or None
+        category_ids = self.category_select.checked_ids() or None
         start_date, end_date = self._selected_date_range()
         displayed = query_transactions(
-            self.session, account_ids=account_ids, start_date=start_date, end_date=end_date
+            self.session,
+            account_ids=account_ids,
+            category_ids=category_ids,
+            start_date=start_date,
+            end_date=end_date,
         )
         self.model.set_rows(displayed)
         self.table.resizeColumnsToContents()
@@ -235,6 +440,7 @@ class TransactionsScreen(QWidget):
         self.page_proxy.reset_page()
         self._update_pagination_controls()
         self._update_selection_sum()
+        self._refresh_summary(displayed)
 
     def _on_filter_text_changed(self, text: str):
         self.group_proxy.set_filter_text(text)

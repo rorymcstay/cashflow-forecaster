@@ -8,6 +8,7 @@ reclassifying a transaction and exploring similar/recurring ones by merchant.
 import datetime as dt
 import itertools
 
+import plotly.graph_objects as go
 from nicegui import ui
 
 from app.models import Account, Category, Transaction
@@ -15,15 +16,18 @@ from app.seed import get_or_create_category
 from app.statement_import import UNCATEGORIZED, generate_suggestions, match_budget_item
 from app.transactions import (
     DATE_RANGE_PRESETS,
+    UNCATEGORIZED_ID,
     date_range_preset,
     merchant_key,
     query_transactions,
     recurring_groups_by_merchant,
     similar_transactions,
+    spend_breakdown,
 )
-from app.web.layout import SUCCESS, TEXT_MUTED, WARNING, get_page_session, page_shell
+from app.web.layout import BORDER, SUCCESS, TEXT_MUTED, WARNING, get_page_session, page_shell
 
 _RANGE_OPTIONS = {k: v for k, v in DATE_RANGE_PRESETS.items() if k != "custom"}
+_CATEGORY_COLORS = ["#5B8DEF", "#34D399", "#F2555C", "#F2B705", "#B45BEF", "#05C7F2", "#F2905B", "#8D95A3"]
 
 GROUP_FIELDS = {
     "None": None,
@@ -59,6 +63,13 @@ _SELECTABLE = "(params) => !(params.data && params.data._group_header)"
 
 def _money(value: float | None) -> str:
     return "" if value is None else f"£{value:,.2f}"
+
+
+def _stat_card(title: str) -> ui.label:
+    with ui.column().classes("stat-card"):
+        ui.label(title).style(f"color: {TEXT_MUTED}; font-size: 11px;")
+        value_label = ui.label("—").style("font-size: 22px; font-weight: 700;")
+    return value_label
 
 
 def _row_dict(t: Transaction, recurring_groups: dict[str, dict]) -> dict:
@@ -121,6 +132,10 @@ def transactions_page():
         accounts = session.query(Account).order_by(Account.name).all()
         account_options = {a.id: a.name for a in accounts}
 
+        categories = session.query(Category).order_by(Category.name).all()
+        category_options = {c.id: c.name for c in categories}
+        category_options[UNCATEGORIZED_ID] = "Uncategorized"
+
         all_transactions = query_transactions(session)
         recurring_groups = recurring_groups_by_merchant(all_transactions)
 
@@ -128,6 +143,13 @@ def transactions_page():
             account_select = (
                 ui.select(
                     account_options, label="Accounts", multiple=True, value=list(account_options.keys())
+                )
+                .classes("min-w-[220px]")
+                .props("use-chips")
+            )
+            category_select = (
+                ui.select(
+                    category_options, label="Categories", multiple=True, value=list(category_options.keys())
                 )
                 .classes("min-w-[220px]")
                 .props("use-chips")
@@ -140,107 +162,225 @@ def transactions_page():
             from_input = ui.input("From").props("type=date").classes("w-40")
             to_input = ui.input("To").props("type=date").classes("w-40")
 
-        with ui.row().classes("w-full gap-4 items-start"):
-            with ui.column().classes("flex-1 gap-1"):
-                grid = (
-                    ui.aggrid(
-                        {
-                            "columnDefs": [
-                                {
-                                    "field": "_select",
-                                    "headerName": "",
-                                    "checkboxSelection": True,
-                                    ":checkboxSelection": _SELECTABLE,
-                                    "headerCheckboxSelection": True,
-                                    "width": 44,
-                                    "pinned": "left",
-                                    "filter": False,
-                                    "sortable": False,
-                                    "resizable": False,
-                                },
-                                {
-                                    "field": "date",
-                                    "headerName": "Date",
-                                    "filter": "agDateColumnFilter",
-                                    "filterParams": {
-                                        "browserDatePicker": True,
-                                        ":comparator": _DATE_FILTER_COMPARATOR,
-                                    },
-                                    "floatingFilter": True,
-                                    ":valueFormatter": _DATE_VALUE_FORMATTER,
-                                    "sort": "desc",
-                                    "width": 120,
-                                },
-                                {
-                                    "field": "account",
-                                    "headerName": "Account",
-                                    "filter": "agTextColumnFilter",
-                                    "floatingFilter": True,
-                                    "width": 140,
-                                },
-                                {
-                                    "field": "description",
-                                    "headerName": "Description",
-                                    "filter": "agTextColumnFilter",
-                                    "floatingFilter": True,
-                                    "flex": 1,
-                                    "minWidth": 220,
-                                },
-                                {
-                                    "field": "category",
-                                    "headerName": "Category",
-                                    "filter": "agTextColumnFilter",
-                                    "floatingFilter": True,
-                                    "width": 140,
-                                },
-                                {
-                                    "field": "recurring",
-                                    "headerName": "Recurring",
-                                    "filter": "agTextColumnFilter",
-                                    "floatingFilter": True,
-                                    "width": 110,
-                                },
-                                {
-                                    "field": "amount",
-                                    "headerName": "Amount",
-                                    "filter": "agNumberColumnFilter",
-                                    "floatingFilter": True,
-                                    ":valueFormatter": _AMOUNT_VALUE_FORMATTER,
-                                    ":cellStyle": _AMOUNT_CELL_STYLE,
-                                    "type": "rightAligned",
-                                    "width": 130,
-                                },
-                            ],
-                            "rowData": [],
-                            "rowSelection": "multiple",
-                            "suppressRowClickSelection": True,
-                            ":getRowId": "(params) => String(params.data.id)",
-                            ":getRowStyle": _GROUP_ROW_STYLE,
-                            "animateRows": False,
-                        },
-                        auto_size_columns=False,
-                    )
-                    .classes("w-full")
-                    .style("height: 65vh;")
-                )
-                selection_label = ui.label("No rows selected").style(f"color: {TEXT_MUTED};")
+        with ui.tabs().classes("w-full") as page_tabs:
+            table_tab = ui.tab("Table")
+            summary_tab = ui.tab("Summary")
 
-            with ui.column().classes("w-96 gap-2 section-card"):
-                detail_container = ui.column().classes("w-full gap-2")
-                with detail_container:
-                    ui.label("Click a transaction to see details here.").style(f"color: {TEXT_MUTED};")
+        with ui.tab_panels(page_tabs, value=table_tab).classes("w-full"):
+            with ui.tab_panel(table_tab), ui.row().classes("w-full gap-4 items-start"):
+                with ui.column().classes("flex-1 gap-1"):
+                    grid = (
+                        ui.aggrid(
+                            {
+                                "columnDefs": [
+                                    {
+                                        "field": "_select",
+                                        "headerName": "",
+                                        "checkboxSelection": True,
+                                        ":checkboxSelection": _SELECTABLE,
+                                        "headerCheckboxSelection": True,
+                                        "width": 44,
+                                        "pinned": "left",
+                                        "filter": False,
+                                        "sortable": False,
+                                        "resizable": False,
+                                    },
+                                    {
+                                        "field": "date",
+                                        "headerName": "Date",
+                                        "filter": "agDateColumnFilter",
+                                        "filterParams": {
+                                            "browserDatePicker": True,
+                                            ":comparator": _DATE_FILTER_COMPARATOR,
+                                        },
+                                        "floatingFilter": True,
+                                        ":valueFormatter": _DATE_VALUE_FORMATTER,
+                                        "sort": "desc",
+                                        "width": 120,
+                                    },
+                                    {
+                                        "field": "account",
+                                        "headerName": "Account",
+                                        "filter": "agTextColumnFilter",
+                                        "floatingFilter": True,
+                                        "width": 140,
+                                    },
+                                    {
+                                        "field": "description",
+                                        "headerName": "Description",
+                                        "filter": "agTextColumnFilter",
+                                        "floatingFilter": True,
+                                        "flex": 1,
+                                        "minWidth": 220,
+                                    },
+                                    {
+                                        "field": "category",
+                                        "headerName": "Category",
+                                        "filter": "agTextColumnFilter",
+                                        "floatingFilter": True,
+                                        "width": 140,
+                                    },
+                                    {
+                                        "field": "recurring",
+                                        "headerName": "Recurring",
+                                        "filter": "agTextColumnFilter",
+                                        "floatingFilter": True,
+                                        "width": 110,
+                                    },
+                                    {
+                                        "field": "amount",
+                                        "headerName": "Amount",
+                                        "filter": "agNumberColumnFilter",
+                                        "floatingFilter": True,
+                                        ":valueFormatter": _AMOUNT_VALUE_FORMATTER,
+                                        ":cellStyle": _AMOUNT_CELL_STYLE,
+                                        "type": "rightAligned",
+                                        "width": 130,
+                                    },
+                                ],
+                                "rowData": [],
+                                "rowSelection": "multiple",
+                                "suppressRowClickSelection": True,
+                                ":getRowId": "(params) => String(params.data.id)",
+                                ":getRowStyle": _GROUP_ROW_STYLE,
+                                "animateRows": False,
+                            },
+                            auto_size_columns=False,
+                        )
+                        .classes("w-full")
+                        .style("height: 65vh;")
+                    )
+                    selection_label = ui.label("No rows selected").style(f"color: {TEXT_MUTED};")
+
+                with ui.column().classes("w-96 gap-2 section-card"):
+                    detail_container = ui.column().classes("w-full gap-2")
+                    with detail_container:
+                        ui.label("Click a transaction to see details here.").style(f"color: {TEXT_MUTED};")
+
+            with ui.tab_panel(summary_tab):
+                with ui.row().classes("gap-4 w-full flex-wrap"):
+                    income_stat = _stat_card("Total Income")
+                    expense_stat = _stat_card("Total Expenses")
+                    net_stat = _stat_card("Net")
+                    avg_expense_stat = _stat_card("Avg Monthly Spend")
+                    count_stat = _stat_card("Transactions")
+
+                with ui.row().classes("w-full gap-4 items-start flex-wrap"):
+                    with ui.column().classes("flex-1 min-w-[360px] gap-1"):
+                        ui.label("Spend by Category").classes("text-lg font-bold")
+                        category_plot = ui.plotly({}).classes("w-full").style("height: 320px;")
+                    with ui.column().classes("flex-1 min-w-[320px] gap-1"):
+                        ui.label("Top Merchants").classes("text-lg font-bold")
+                        merchants_table = ui.table(
+                            columns=[
+                                {
+                                    "name": "merchant",
+                                    "label": "Merchant",
+                                    "field": "merchant",
+                                    "align": "left",
+                                },
+                                {"name": "count", "label": "Count", "field": "count", "align": "right"},
+                                {"name": "amount", "label": "Total", "field": "amount", "align": "right"},
+                            ],
+                            rows=[],
+                            row_key="merchant",
+                            pagination=10,
+                        ).classes("w-full")
+
+                ui.label("Income vs Expense by Month").classes("text-lg font-bold")
+                monthly_plot = ui.plotly({}).classes("w-full").style("height: 320px;")
 
         def reload_rows():
             selected_account_ids = account_select.value or None
+            selected_category_ids = category_select.value or None
             start_date = dt.date.fromisoformat(from_input.value) if from_input.value else None
             end_date = dt.date.fromisoformat(to_input.value) if to_input.value else None
             displayed = query_transactions(
-                session, account_ids=selected_account_ids, start_date=start_date, end_date=end_date
+                session,
+                account_ids=selected_account_ids,
+                category_ids=selected_category_ids,
+                start_date=start_date,
+                end_date=end_date,
             )
             rows = [_row_dict(t, recurring_groups) for t in displayed]
             grid.options["rowData"] = _build_grid_rows(rows, group_select.value)
             grid.update()
             selection_label.set_text("No rows selected")
+            refresh_summary(displayed)
+
+        def refresh_summary(displayed: list[Transaction]):
+            breakdown = spend_breakdown(displayed)
+            income_stat.set_text(_money(breakdown["total_income"]))
+            expense_stat.set_text(_money(breakdown["total_expense"]))
+            net_stat.set_text(_money(breakdown["net"]))
+            net_stat.style(
+                f"color: {SUCCESS if breakdown['net'] >= 0 else WARNING}; font-size: 22px; font-weight: 700;"
+            )
+            avg_expense_stat.set_text(_money(breakdown["avg_monthly_expense"]))
+            count_stat.set_text(str(breakdown["transaction_count"]))
+
+            top_categories = list(reversed(breakdown["by_category"][:12]))
+            n = len(top_categories)
+            bar_colors = [_CATEGORY_COLORS[(n - 1 - i) % len(_CATEGORY_COLORS)] for i in range(n)]
+            cat_fig = go.Figure()
+            cat_fig.add_trace(
+                go.Bar(
+                    x=[c["amount"] for c in top_categories],
+                    y=[c["category"] for c in top_categories],
+                    orientation="h",
+                    marker_color=bar_colors,
+                    text=[f"{c['pct']:.0f}%" for c in top_categories],
+                    textposition="outside",
+                )
+            )
+            cat_fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color=TEXT_MUTED),
+                xaxis=dict(tickprefix="£", gridcolor=BORDER),
+                yaxis=dict(gridcolor=BORDER),
+                margin=dict(l=10, r=10, t=10, b=10),
+                showlegend=False,
+            )
+            category_plot.figure = cat_fig
+            category_plot.update()
+
+            merchants_table.rows = [
+                {"merchant": m["merchant"], "count": m["count"], "amount": _money(m["amount"])}
+                for m in breakdown["top_merchants"]
+            ]
+            merchants_table.update()
+
+            months = breakdown["by_month"]
+            month_fig = go.Figure()
+            month_fig.add_trace(
+                go.Bar(
+                    x=[m["month_label"] for m in months],
+                    y=[m["income"] for m in months],
+                    name="Income",
+                    marker_color=SUCCESS,
+                )
+            )
+            month_fig.add_trace(
+                go.Bar(
+                    x=[m["month_label"] for m in months],
+                    y=[m["expense"] for m in months],
+                    name="Expense",
+                    marker_color=WARNING,
+                )
+            )
+            month_fig.update_layout(
+                barmode="group",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color=TEXT_MUTED),
+                yaxis=dict(tickprefix="£", gridcolor=BORDER),
+                xaxis=dict(gridcolor=BORDER),
+                margin=dict(l=10, r=10, t=30, b=10),
+                legend=dict(orientation="h", y=1.15),
+            )
+            monthly_plot.figure = month_fig
+            monthly_plot.update()
 
         def apply_range_preset():
             start, end = date_range_preset(range_select.value)
@@ -347,6 +487,7 @@ def transactions_page():
         grid.on("selectionChanged", handle_selection_changed)
         grid.on("cellClicked", handle_cell_clicked)
         account_select.on_value_change(lambda e: reload_rows())
+        category_select.on_value_change(lambda e: reload_rows())
         group_select.on_value_change(lambda e: reload_rows())
         search_input.on_value_change(
             lambda e: grid.run_grid_method("setGridOption", "quickFilterText", e.value)

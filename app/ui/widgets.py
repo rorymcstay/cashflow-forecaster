@@ -1,7 +1,6 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget
 
-from app.models import Account
 from app.ui import theme
 
 
@@ -63,21 +62,33 @@ class CollapsibleSection(QWidget):
 
 class AccountMultiSelect(QPushButton):
     """Button that opens a checkbox-list popup for selecting zero or more
-    accounts. `checked_ids()` always returns the literal list of checked ids
-    (filtering by every id is equivalent to no filter, so callers don't need
-    a special case for "all checked").
+    items — accounts by default, but any id/name collection (e.g.
+    categories) via `noun`/`noun_plural`/`all_selected_label`. `checked_ids()`
+    always returns the literal list of checked ids (filtering by every id is
+    equivalent to no filter, so callers don't need a special case for "all
+    checked").
 
     `label_mode` only changes the button's own text: "include" describes the
-    checked accounts as the ones being shown ("All Accounts (combined)", "N
-    accounts selected"); "exclude" describes them as the ones being left out
-    ("No accounts excluded", "N accounts excluded").
+    checked items as the ones being shown (`all_selected_label`, "N accounts
+    selected"); "exclude" describes them as the ones being left out ("No
+    accounts excluded", "N accounts excluded").
     """
 
     selectionChanged = Signal()
 
-    def __init__(self, parent=None, label_mode: str = "include"):
+    def __init__(
+        self,
+        parent=None,
+        label_mode: str = "include",
+        noun: str = "account",
+        noun_plural: str = "accounts",
+        all_selected_label: str | None = None,
+    ):
         super().__init__(parent)
         self.label_mode = label_mode
+        self.noun = noun
+        self.noun_plural = noun_plural
+        self.all_selected_label = all_selected_label or f"All {noun_plural.capitalize()} (combined)"
         self._names: dict[int, str] = {}
         self._order: list[int] = []
         self._checked: set[int] = set()
@@ -85,13 +96,14 @@ class AccountMultiSelect(QPushButton):
 
     def set_accounts(
         self,
-        accounts: list[Account],
+        accounts: list,
         default_all_checked: bool = True,
         default_checked_ids: set[int] | None = None,
     ) -> None:
-        """Repopulate from the current account list, keeping any previously
-        checked accounts that still exist. New (first-population) accounts
-        default to `default_checked_ids` if given, otherwise all-checked or
+        """Repopulate from the current item list (anything with `.id`/`.name`
+        — accounts, categories, ...), keeping any previously checked items
+        that still exist. New (first-population) items default to
+        `default_checked_ids` if given, otherwise all-checked or
         none-checked per `default_all_checked`."""
         previous = self._checked
         had_previous = bool(self._names)
@@ -113,22 +125,22 @@ class AccountMultiSelect(QPushButton):
     def _update_label(self) -> None:
         if self.label_mode == "exclude":
             if not self._checked:
-                self.setText("No accounts excluded")
+                self.setText(f"No {self.noun_plural} excluded")
             elif self._checked == set(self._names):
-                self.setText("All accounts excluded")
+                self.setText(f"All {self.noun_plural} excluded")
             else:
-                self.setText(f"{len(self._checked)} account(s) excluded")
+                self.setText(f"{len(self._checked)} {self.noun}(s) excluded")
             return
 
         if not self._checked:
-            self.setText("No accounts selected")
+            self.setText(f"No {self.noun_plural} selected")
         elif self._checked == set(self._names):
-            self.setText("All Accounts (combined)")
+            self.setText(self.all_selected_label)
         elif len(self._checked) == 1:
             (only_id,) = self._checked
             self.setText(self._names[only_id])
         else:
-            self.setText(f"{len(self._checked)} accounts selected")
+            self.setText(f"{len(self._checked)} {self.noun_plural} selected")
 
     def _show_popup(self) -> None:
         popup = QWidget(self, Qt.WindowType.Popup)
