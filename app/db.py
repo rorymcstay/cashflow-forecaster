@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
@@ -5,7 +6,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import Base
 
-DB_PATH = Path(__file__).resolve().parent.parent / "budgeting.db"
+DB_PATH = (
+    Path(os.environ["BUDGETING_DB_PATH"])
+    if "BUDGETING_DB_PATH" in os.environ
+    else (Path(__file__).resolve().parent.parent / "budgeting.db")
+)
 # Generous pool headroom: the desktop app and MCP server each hold exactly
 # one session for their whole lifetime, but the web UI opens one session per
 # browser tab (closed on disconnect) — several tabs, or a slow-to-connect
