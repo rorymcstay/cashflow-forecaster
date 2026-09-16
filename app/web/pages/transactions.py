@@ -11,7 +11,7 @@ import itertools
 import plotly.graph_objects as go
 from nicegui import ui
 
-from app.models import Account, Category, Transaction
+from app.models import Account, BudgetItem, Category, FlowType, Frequency, Transaction
 from app.seed import get_or_create_category
 from app.statement_import import UNCATEGORIZED, generate_suggestions, match_budget_item
 from app.transactions import (
@@ -405,6 +405,68 @@ def transactions_page():
             if transaction is not None:
                 show_detail(transaction)
 
+        def open_budget_item_dialog(transaction: Transaction):
+            account_options = {a.id: a.name for a in session.query(Account).order_by(Account.name).all()}
+            categories = sorted({c.name for c in session.query(Category).all()})
+
+            with ui.dialog() as dialog, ui.card().classes("gap-2 min-w-[420px]"):
+                ui.label("Add Budget Item").classes("text-lg font-bold")
+                desc_input = ui.input("Description", value=transaction.description)
+                amount_input = ui.number("Amount", value=abs(transaction.amount), format="%.2f")
+                flow_select = ui.select(
+                    {ft.value: ft.value for ft in FlowType},
+                    label="Type",
+                    value=(FlowType.INCOME.value if transaction.amount > 0 else FlowType.EXPENSE.value),
+                )
+                freq_select = ui.select(
+                    {f.value: f.value for f in Frequency}, label="Frequency", value=Frequency.MONTHLY.value
+                )
+                from_input = ui.input("Effective From", value=dt.date.today().isoformat()).props("type=date")
+                category_input = ui.select(
+                    categories,
+                    label="Category",
+                    value=(transaction.category.name if transaction.category else None),
+                    with_input=True,
+                    new_value_mode="add-unique",
+                )
+                account_select = ui.select(
+                    account_options, label="Account", value=transaction.statement.account_id
+                )
+
+                def save():
+                    description = desc_input.value.strip()
+                    if not description:
+                        ui.notify("Please enter a description.", type="negative")
+                        return
+                    category_name = (category_input.value or "").strip()
+                    if not category_name:
+                        ui.notify("Please enter or choose a category.", type="negative")
+                        return
+                    if account_select.value is None:
+                        ui.notify("Choose an account.", type="negative")
+                        return
+
+                    item = BudgetItem(
+                        description=description,
+                        amount=amount_input.value,
+                        flow_type=FlowType(flow_select.value),
+                        frequency=Frequency(freq_select.value),
+                        effective_from=dt.date.fromisoformat(from_input.value),
+                        category=get_or_create_category(session, category_name),
+                        account_id=account_select.value,
+                    )
+                    session.add(item)
+                    session.commit()
+                    dialog.close()
+                    ui.notify(f"Added budget item “{description}”.", type="positive")
+                    show_detail(transaction)
+
+                with ui.row().classes("justify-end w-full gap-2 mt-2"):
+                    ui.button("Cancel", on_click=dialog.close).props("flat")
+                    ui.button("Save", on_click=save)
+
+            dialog.open()
+
         def show_detail(transaction: Transaction):
             detail_container.clear()
             key = merchant_key(transaction)
@@ -449,6 +511,9 @@ def transactions_page():
                     )
                 ui.label(f"Budget item: {budget_item.description if budget_item else '—'}").style(
                     f"color: {TEXT_MUTED};"
+                )
+                ui.button("+ Add Budget Item", on_click=lambda: open_budget_item_dialog(transaction)).props(
+                    "flat dense"
                 )
 
                 ui.separator()

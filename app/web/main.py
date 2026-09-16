@@ -23,4 +23,9 @@ from app.web.pages import (  # noqa: F401
 
 init_db()
 
-ui.run(title="Budgeting", host="0.0.0.0", port=8084, reload=os.environ.get("RELOAD") == "1")
+ui.run(
+    title="Budgeting",
+    host="0.0.0.0",
+    port=8084,
+    reload=os.environ.get("RELOAD") == "1",
+)
