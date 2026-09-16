@@ -35,13 +35,16 @@ def budget_builder_page():
 
         all_transactions = query_transactions(session)
         vendors = vendor_options(all_transactions)
-        vendor_select_options: dict[str | None, str] = {None: "Any vendor"}
-        vendor_select_options.update({v.key: f"{v.label} ({v.transaction_count})" for v in vendors})
+        vendor_select_options = {v.key: f"{v.label} ({v.transaction_count})" for v in vendors}
 
         with ui.row().classes("items-center gap-4 flex-wrap w-full"):
-            vendor_select = ui.select(
-                vendor_select_options, label="Vendor", value=None, with_input=True
-            ).classes("min-w-[220px]")
+            vendor_select = (
+                ui.select(
+                    vendor_select_options, label="Vendors (any of)", multiple=True, value=[], with_input=True
+                )
+                .classes("min-w-[260px]")
+                .props("use-chips")
+            )
             category_select = ui.select(category_options, label="Category", value=None).classes(
                 "min-w-[180px]"
             )
@@ -108,11 +111,11 @@ def budget_builder_page():
 
         def recompute():
             result_container.clear()
-            vendor_key = vendor_select.value
+            vendor_keys = vendor_select.value or None
             category_id = category_select.value
             interval = Frequency(interval_select.value)
 
-            if vendor_key is None and category_id is None:
+            if not vendor_keys and category_id is None:
                 add_form.set_visibility(False)
                 current_aggregate["value"] = None
                 with result_container:
@@ -131,7 +134,7 @@ def budget_builder_page():
                 end_date=end_date,
             )
             aggregate = aggregate_spend(
-                base, interval, vendor_key=vendor_key, start_date=start_date, end_date=end_date
+                base, interval, vendor_keys=vendor_keys, start_date=start_date, end_date=end_date
             )
             current_aggregate["value"] = aggregate
 
@@ -170,7 +173,8 @@ def budget_builder_page():
 
             # Prefill the add-line form from this aggregate — a fresh group
             # each time you recompute, so overwriting is the expected result.
-            vendor_label = next((v.label for v in vendors if v.key == vendor_key), None)
+            vendor_labels = [v.label for v in vendors if v.key in (vendor_keys or [])]
+            vendor_label = " + ".join(vendor_labels) if vendor_labels else None
             category_label = category_options.get(category_id) if category_id is not None else None
             desc_input.value = vendor_label or category_label or ""
             amount_input.value = abs(aggregate.average_per_period)

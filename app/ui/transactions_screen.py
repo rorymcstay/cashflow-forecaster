@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDateEdit,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy.orm import Session
 
-from app.models import Account, Category, Transaction
+from app.models import Account, Category, FlowType, Transaction
 from app.seed import get_or_create_category
 from app.statement_import import UNCATEGORIZED, generate_suggestions, match_budget_item
 from app.transactions import (
@@ -39,6 +40,7 @@ from app.transactions import (
     spend_breakdown,
 )
 from app.ui import theme
+from app.ui.dialogs import BudgetItemDialog
 from app.ui.filter_proxy import GroupFilterProxyModel, PageFilterProxyModel
 from app.ui.table_models import ObjectTableModel
 from app.ui.widgets import AccountMultiSelect
@@ -583,6 +585,10 @@ class TransactionsScreen(QWidget):
         budget_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(budget_label)
 
+        add_budget_item_btn = QPushButton("+ Add Budget Item")
+        add_budget_item_btn.clicked.connect(lambda: self._add_budget_item(transaction))
+        layout.addWidget(add_budget_item_btn)
+
         layout.addWidget(self._section_label("Recurring"))
         group = self.recurring_groups.get(merchant_key(transaction))
         if group is None:
@@ -617,6 +623,19 @@ class TransactionsScreen(QWidget):
             layout.addWidget(btn)
 
         layout.addStretch()
+
+    def _add_budget_item(self, transaction: Transaction):
+        dlg = BudgetItemDialog(
+            self.session,
+            parent=self,
+            initial_account_id=transaction.statement.account_id,
+            initial_flow_type=FlowType.INCOME if transaction.amount > 0 else FlowType.EXPENSE,
+            initial_description=transaction.description,
+            initial_amount=abs(transaction.amount),
+            initial_category_name=transaction.category.name if transaction.category else None,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._show_detail(transaction)
 
     def _refresh_suggestions(self, transaction: Transaction):
         generate_suggestions(self.session, transaction.statement.account)

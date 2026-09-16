@@ -417,14 +417,19 @@ class BudgetItemDialog(QDialog):
         parent=None,
         initial_account_id: int | None = None,
         initial_flow_type: FlowType | None = None,
+        initial_description: str | None = None,
+        initial_amount: float | None = None,
+        initial_category_name: str | None = None,
     ):
         super().__init__(parent)
         self.session = session
         self.obj = obj
         self.setWindowTitle("Edit Budget Item" if obj else "Add Budget Item")
 
-        self.desc_edit = QLineEdit(obj.description if obj else "")
-        self.amount_spin = _amount_spinbox(obj.amount if obj else 0.0)
+        self.desc_edit = QLineEdit(obj.description if obj else (initial_description or ""))
+        self.amount_spin = _amount_spinbox(
+            obj.amount if obj else (initial_amount if initial_amount is not None else 0.0)
+        )
         self.amount_spin.setRange(0, 1_000_000)
 
         self.flow_combo = QComboBox()
@@ -461,6 +466,8 @@ class BudgetItemDialog(QDialog):
             self.category_combo.addItem(c.name)
         if obj:
             self.category_combo.setCurrentText(obj.category.name)
+        elif initial_category_name:
+            self.category_combo.setCurrentText(initial_category_name)
         elif default_flow_type == FlowType.TRANSFER:
             self.category_combo.setCurrentText("Transfers")
 

@@ -63,14 +63,16 @@ class SpendAggregate:
 def aggregate_spend(
     transactions: list[Transaction],
     interval: Frequency,
-    vendor_key: str | None = None,
+    vendor_keys: list[str] | None = None,
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
 ) -> SpendAggregate:
-    """Sum + per-period average for whichever of `transactions` matches
-    `vendor_key` (if given). Callers are expected to have already narrowed
-    `transactions` by account/category/date via query_transactions — this
-    only adds the vendor-by-merchant filter, which isn't a DB column.
+    """Sum + per-period average for whichever of `transactions` matches any
+    of `vendor_keys` (if given — one or more vendors are grouped together
+    into a single average, e.g. "Uber" + "Uber Eats" as one line). Callers
+    are expected to have already narrowed `transactions` by
+    account/category/date via query_transactions — this only adds the
+    vendor-by-merchant filter, which isn't a DB column.
 
     The averaging window defaults to the span between the matched
     transactions' own dates, but an explicit [start_date, end_date] (e.g. the
@@ -79,7 +81,8 @@ def aggregate_spend(
     dilute across the *requested* lookback, not just the days it happened to
     appear on, so a short apparent history doesn't overstate the average.
     """
-    matched = [t for t in transactions if vendor_key is None or merchant_key(t) == vendor_key]
+    vendor_key_set = set(vendor_keys) if vendor_keys else None
+    matched = [t for t in transactions if vendor_key_set is None or merchant_key(t) in vendor_key_set]
     matched.sort(key=lambda t: t.date, reverse=True)
 
     total = round(sum(t.amount for t in matched), 2)
