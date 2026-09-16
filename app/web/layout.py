@@ -24,6 +24,7 @@ NAV_ITEMS = [
     ("/cashflow", "Cash Flow Forecast"),
     ("/scenarios", "Scenarios"),
     ("/budget-items", "Budget Items"),
+    ("/budget-builder", "Budget Builder"),
     ("/upcoming-expenses", "Upcoming Expenses"),
     ("/statements", "Statements"),
     ("/transactions", "Transactions"),

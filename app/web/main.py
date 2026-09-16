@@ -11,6 +11,7 @@ from app.db import init_db
 from app.web import _engineio_patch  # noqa: F401
 from app.web.pages import (  # noqa: F401
     accounts,
+    budget_builder,
     budget_items,
     budget_view,
     cashflow,
