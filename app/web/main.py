@@ -3,6 +3,8 @@
 Reuses the same SQLite DB and business logic (app/forecast.py, app/models.py)
 as the desktop app — this is purely an alternative front end."""
 
+import os
+
 from nicegui import ui
 
 from app.db import init_db
@@ -21,4 +23,4 @@ from app.web.pages import (  # noqa: F401
 
 init_db()
 
-ui.run(title="Budgeting", host="0.0.0.0", port=8084, reload=True)
+ui.run(title="Budgeting", host="0.0.0.0", port=8084, reload=os.environ.get("RELOAD") == "1")

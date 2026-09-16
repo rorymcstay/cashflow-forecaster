@@ -3,7 +3,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from nicegui import events, ui
+from nicegui import events, run, ui
 
 from app.models import Account, BudgetSuggestion, Category, Statement, SuggestionStatus, Transaction
 from app.pdf_statement_parsers import parse_pdf_statement
@@ -133,16 +133,20 @@ def statements_page():
             suffix = Path(e.file.name).suffix.lower()
             try:
                 if suffix == ".csv":
+                    transactions = await run.io_bound(extract_csv_transactions, str(tmp_path))
                     parsed = {
                         "kind": "csv",
-                        "transactions": extract_csv_transactions(str(tmp_path)),
+                        "transactions": transactions or [],
                         "period_start": None,
                         "period_end": None,
                         "account_hint": None,
                         "reconciliation": None,
                     }
                 elif suffix == ".pdf":
-                    parsed = parse_pdf_statement(str(tmp_path))
+                    parsed = await run.io_bound(parse_pdf_statement, str(tmp_path)) or {
+                        "kind": None,
+                        "transactions": [],
+                    }
                 else:
                     ui.notify(f"Unsupported file type: {e.file.name}", type="negative")
                     return
