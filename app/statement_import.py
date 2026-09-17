@@ -67,12 +67,23 @@ def match_budget_item(
     filed (e.g. a TV licence transaction classifies as Utilities but is
     commonly budgeted under Subscriptions), so requiring both would produce
     false negatives.
+
+    A vendor-scoped item (`vendor_list` set — built by the Budget Builder to
+    cover only some vendors within a category, e.g. "Holiday" covering only
+    certain airlines) skips the description-overlap fallback entirely: it
+    only ever matches a transaction whose own merchant key is in that list,
+    even if the two descriptions happen to overlap textually.
     """
     norm = normalize_description(description)
     if not norm:
         return None
     for item in session.query(BudgetItem).filter_by(account_id=account_id).all():
         if not item.is_active_on(as_of):
+            continue
+        vendor_list = item.vendor_list
+        if vendor_list:
+            if norm in vendor_list:
+                return item
             continue
         item_norm = normalize_description(item.description)
         if item_norm and (item_norm in norm or norm in item_norm):

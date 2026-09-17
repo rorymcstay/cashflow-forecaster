@@ -3,7 +3,7 @@ import datetime as dt
 from nicegui import ui
 
 from app.budget_builder import aggregate_spend, vendor_options
-from app.models import Account, BudgetItem, Category, FlowType, Frequency
+from app.models import OCCURRENCES_PER_YEAR, Account, BudgetItem, Category, FlowType, Frequency
 from app.seed import get_or_create_category
 from app.transactions import query_transactions
 from app.web.layout import SUCCESS, TEXT_MUTED, WARNING, get_page_session, page_shell
@@ -78,6 +78,9 @@ def budget_builder_page():
             with ui.row().classes("items-center gap-3 flex-wrap w-full"):
                 desc_input = ui.input("Description").classes("min-w-[220px]")
                 amount_input = ui.number("Amount", value=0.0, format="%.2f").classes("w-32")
+                line_frequency_select = ui.select(
+                    {f.value: f.value for f in Frequency}, label="Frequency", value=Frequency.MONTHLY.value
+                ).classes("w-36")
                 flow_select = ui.select(
                     {ft.value: ft.value for ft in FlowType},
                     label="Type",
@@ -101,6 +104,7 @@ def budget_builder_page():
         added_container = ui.column().classes("w-full gap-1")
 
         current_aggregate = {"value": None}
+        line_frequency_state = {"value": Frequency.MONTHLY.value}
 
         def _stat(title: str, value: str, color: str | None = None) -> None:
             with ui.column().classes("stat-card"):
@@ -178,6 +182,14 @@ def budget_builder_page():
             category_label = category_options.get(category_id) if category_id is not None else None
             desc_input.value = vendor_label or category_label or ""
             amount_input.value = abs(aggregate.average_per_period)
+            # The committed budget line's frequency defaults to whatever
+            # interval was just used to average history, but is
+            # independently editable below (on_line_frequency_changed
+            # rescales the amount rather than re-running the whole
+            # aggregate) — e.g. average annual holiday spend but commit it
+            # as a smoothed monthly line.
+            line_frequency_select.value = interval_select.value
+            line_frequency_state["value"] = interval_select.value
             flow_select.value = (
                 FlowType.INCOME.value if aggregate.average_per_period > 0 else FlowType.EXPENSE.value
             )
@@ -188,6 +200,16 @@ def budget_builder_page():
             if source_account_ids and len(source_account_ids) == 1:
                 target_account_select.value = source_account_ids[0]
             add_form.set_visibility(True)
+
+        def on_line_frequency_changed():
+            new_freq = Frequency(line_frequency_select.value)
+            old_freq = Frequency(line_frequency_state["value"])
+            if new_freq != old_freq and amount_input.value:
+                rescaled = (
+                    amount_input.value * OCCURRENCES_PER_YEAR[old_freq] / OCCURRENCES_PER_YEAR[new_freq]
+                )
+                amount_input.value = round(rescaled, 2)
+            line_frequency_state["value"] = line_frequency_select.value
 
         def render_added():
             added_container.clear()
@@ -222,12 +244,12 @@ def budget_builder_page():
                 ui.notify("Choose a target account.", type="negative")
                 return
 
-            interval = Frequency(interval_select.value)
+            line_frequency = Frequency(line_frequency_select.value)
             item = BudgetItem(
                 description=description,
                 amount=abs(amount_input.value),
                 flow_type=FlowType(flow_select.value),
-                frequency=interval,
+                frequency=line_frequency,
                 effective_from=dt.date.fromisoformat(from_date_input.value),
                 category=get_or_create_category(session, category_name),
                 account_id=target_account_select.value,
@@ -238,7 +260,7 @@ def budget_builder_page():
                 {
                     "description": description,
                     "amount": item.amount,
-                    "frequency": interval.value,
+                    "frequency": line_frequency.value,
                     "account": account_options[target_account_select.value],
                 }
             )
@@ -249,5 +271,6 @@ def budget_builder_page():
         category_select.on_value_change(lambda e: recompute())
         source_account_select.on_value_change(lambda e: recompute())
         interval_select.on_value_change(lambda e: recompute())
+        line_frequency_select.on_value_change(lambda e: on_line_frequency_changed())
         from_input.on_value_change(lambda e: recompute())
         to_input.on_value_change(lambda e: recompute())

@@ -13,7 +13,11 @@ recurring-transaction detector to spot a 1:1 merchant match.
 import datetime as dt
 from dataclasses import dataclass, field
 
-from app.models import OCCURRENCES_PER_YEAR, Frequency, Transaction
+from sqlalchemy.orm import Session
+
+from app.models import OCCURRENCES_PER_YEAR, BudgetItem, FlowType, Frequency, Transaction
+from app.seed import get_or_create_category
+from app.statement_import import match_budget_item
 from app.transactions import merchant_key
 
 DAYS_PER_YEAR = 365.25
@@ -105,3 +109,92 @@ def aggregate_spend(
         periods=round(periods, 2),
         average_per_period=average_per_period,
     )
+
+
+def uncaptured_transactions(session: Session, transactions: list[Transaction]) -> list[Transaction]:
+    """Whichever of `transactions` has no covering BudgetItem: neither linked
+    at import time (`matched_budget_item`) nor matched live by
+    match_budget_item — which also picks up items created *after* the
+    transaction was imported, and respects vendor-scoped items (a
+    category-level item that only covers some vendors leaves the rest of
+    that category's transactions uncaptured). This is the complement of what
+    the builder has already turned into budget lines: the spend still
+    waiting on one."""
+    result = []
+    for t in transactions:
+        if t.matched_budget_item_id is not None:
+            continue
+        if match_budget_item(session, t.statement.account_id, t.description, t.date) is not None:
+            continue
+        result.append(t)
+    return result
+
+
+@dataclass
+class UncapturedVendor:
+    key: str
+    label: str
+    transaction_count: int
+    total: float  # signed: negative = net expense, positive = net income
+
+
+def uncaptured_by_vendor(transactions: list[Transaction]) -> list[UncapturedVendor]:
+    """uncaptured_transactions(), grouped by merchant and ranked by total
+    expense (biggest first) — the shortlist of vendors most worth building a
+    budget line for next."""
+    groups: dict[str, dict] = {}
+    for t in transactions:
+        key = merchant_key(t)
+        if not key:
+            continue
+        group = groups.setdefault(key, {"labels": {}, "total": 0.0})
+        group["labels"][t.description] = group["labels"].get(t.description, 0) + 1
+        group["total"] += t.amount
+
+    rows = [
+        UncapturedVendor(
+            key=key,
+            label=max(group["labels"], key=lambda d: group["labels"][d]),
+            transaction_count=sum(group["labels"].values()),
+            total=round(group["total"], 2),
+        )
+        for key, group in groups.items()
+    ]
+    rows.sort(key=lambda r: r.total)  # most negative (biggest expense) first
+    return rows
+
+
+@dataclass
+class StagedLine:
+    """A budget-line draft staged in the interactive builder before being
+    committed to the database — lets you build up several lines, review or
+    discard any of them, and save them all together."""
+
+    description: str
+    amount: float
+    flow_type: FlowType
+    frequency: Frequency
+    account_id: int
+    category_name: str
+    vendor_keys: list[str] = field(default_factory=list)
+    vendor_label: str = ""
+    effective_from: dt.date = field(default_factory=dt.date.today)
+    window_start: dt.date | None = None
+    window_end: dt.date | None = None
+
+
+def commit_staged_line(session: Session, staged: StagedLine) -> BudgetItem:
+    """Persist one staged draft as a real BudgetItem. Caller commits the
+    session once after committing every staged line in a batch."""
+    item = BudgetItem(
+        description=staged.description,
+        amount=abs(staged.amount),
+        flow_type=staged.flow_type,
+        frequency=staged.frequency,
+        effective_from=staged.effective_from,
+        category=get_or_create_category(session, staged.category_name),
+        account_id=staged.account_id,
+    )
+    item.vendor_list = staged.vendor_keys
+    session.add(item)
+    return item

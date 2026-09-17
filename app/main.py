@@ -16,6 +16,7 @@ from app.db import get_session, init_db
 from app.seed import seed_defaults
 from app.ui import theme
 from app.ui.accounts_screen import AccountsScreen
+from app.ui.budget_builder_screen import BudgetBuilderScreen
 from app.ui.budget_items_screen import BudgetItemsScreen
 from app.ui.budget_view_screen import BudgetViewScreen
 from app.ui.cashflow_screen import CashflowForecastScreen
@@ -78,6 +79,7 @@ class MainWindow(QMainWindow):
         self.dashboard_screen = DashboardScreen(self.session)
         self.accounts_screen = AccountsScreen(self.session, on_change=self.on_data_changed)
         self.budget_items_screen = BudgetItemsScreen(self.session, on_change=self.on_data_changed)
+        self.budget_builder_screen = BudgetBuilderScreen(self.session, on_change=self.on_data_changed)
         self.upcoming_screen = UpcomingExpensesScreen(self.session, on_change=self.on_data_changed)
         self.statements_screen = StatementsScreen(self.session, on_change=self.on_data_changed)
         self.transactions_screen = TransactionsScreen(self.session)
@@ -91,6 +93,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.cashflow_screen, "Cash Flow Forecast")
         self.tabs.addTab(self.scenario_screen, "Scenarios")
         self.tabs.addTab(self.budget_items_screen, "Budget Items")
+        self.tabs.addTab(self.budget_builder_screen, "Budget Builder")
         self.tabs.addTab(self.upcoming_screen, "Upcoming Expenses")
         self.tabs.addTab(self.statements_screen, "Statements")
         self.tabs.addTab(self.transactions_screen, "Transactions")
@@ -106,6 +109,8 @@ class MainWindow(QMainWindow):
         self.statements_screen.refresh()
         self.transactions_screen.reload_accounts()
         self.transactions_screen.refresh()
+        self.budget_builder_screen.reload_accounts()
+        self.budget_builder_screen.refresh()
         self.budget_view_screen.reload_accounts()
         self.budget_view_screen.refresh()
         self.cashflow_screen.reload_accounts()
@@ -124,6 +129,9 @@ class MainWindow(QMainWindow):
         elif widget is self.transactions_screen:
             self.transactions_screen.reload_accounts()
             self.transactions_screen.refresh()
+        elif widget is self.budget_builder_screen:
+            self.budget_builder_screen.reload_accounts()
+            self.budget_builder_screen.refresh()
         elif widget is self.budget_view_screen:
             self.budget_view_screen.reload_accounts()
             self.budget_view_screen.refresh()

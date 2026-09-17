@@ -53,6 +53,7 @@ _ADDED_COLUMNS = {
     ],
     "budget_items": [
         ("target_account_id", "INTEGER REFERENCES accounts(id)"),
+        ("vendors", "VARCHAR(2000)"),
     ],
 }
 

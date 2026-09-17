@@ -122,6 +122,16 @@ class BudgetItem(Base):
     effective_from: Mapped[dt.date] = mapped_column(Date)
     effective_until: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     notes: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Comma-separated normalised merchant keys (see app/transactions.py
+    # merchant_key) this item covers, or None for every transaction in
+    # `category`. Lets a category-level budget line scope itself to a subset
+    # of vendors — e.g. "Holiday" covering only certain airlines/hotels,
+    # rather than every transaction ever filed under that category — see
+    # match_budget_item in app/statement_import.py, which only falls back to
+    # description-overlap matching when this is unset. Built by the Budget
+    # Builder screens; free of commas since normalize_description strips
+    # anything that isn't A-Z0-9/space.
+    vendors: Mapped[str | None] = mapped_column(String(2000), nullable=True)
 
     category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"))
     account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
@@ -136,6 +146,14 @@ class BudgetItem(Base):
     @property
     def monthly_equivalent(self) -> float:
         return self.amount * OCCURRENCES_PER_YEAR[self.frequency] / 12
+
+    @property
+    def vendor_list(self) -> list[str]:
+        return self.vendors.split(",") if self.vendors else []
+
+    @vendor_list.setter
+    def vendor_list(self, keys: list[str]) -> None:
+        self.vendors = ",".join(keys) if keys else None
 
     def is_active_on(self, as_of: dt.date) -> bool:
         if self.effective_from > as_of:
