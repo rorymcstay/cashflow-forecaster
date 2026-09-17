@@ -139,26 +139,26 @@ def transactions_page():
         all_transactions = query_transactions(session)
         recurring_groups = recurring_groups_by_merchant(all_transactions)
 
-        with ui.row().classes("items-center gap-4 flex-wrap w-full"):
+        with ui.row().classes("items-center gap-2 flex-wrap w-full"):
             account_select = (
                 ui.select(
                     account_options, label="Accounts", multiple=True, value=list(account_options.keys())
                 )
-                .classes("min-w-[220px]")
+                .classes("min-w-[190px]")
                 .props("use-chips")
             )
             category_select = (
                 ui.select(
                     category_options, label="Categories", multiple=True, value=list(category_options.keys())
                 )
-                .classes("min-w-[220px]")
+                .classes("min-w-[190px]")
                 .props("use-chips")
             )
             group_select = ui.select(list(GROUP_FIELDS), label="Group by", value="None")
             search_input = ui.input("Search").props("debounce=300 clearable")
 
-        with ui.row().classes("items-center gap-4 flex-wrap w-full"):
-            range_select = ui.select(_RANGE_OPTIONS, label="Date range", value="all").classes("min-w-[160px]")
+        with ui.row().classes("items-center gap-2 flex-wrap w-full"):
+            range_select = ui.select(_RANGE_OPTIONS, label="Date range", value="all").classes("min-w-[140px]")
             from_input = ui.input("From").props("type=date").classes("w-40")
             to_input = ui.input("To").props("type=date").classes("w-40")
 

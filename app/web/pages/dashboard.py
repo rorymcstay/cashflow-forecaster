@@ -27,7 +27,7 @@ def dashboard_page():
         accounts = session.query(Account).order_by(Account.name).all()
         account_options = {a.id: a.name for a in accounts}
 
-        with ui.row().classes("items-center gap-4"):
+        with ui.row().classes("items-center gap-2"):
             as_of_input = ui.input("As of", value=dt.date.today().isoformat()).props("type=date")
             exclude_select = ui.select(
                 account_options, multiple=True, label="Exclude accounts", value=[]

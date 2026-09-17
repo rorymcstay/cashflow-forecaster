@@ -37,16 +37,16 @@ def budget_builder_page():
         vendors = vendor_options(all_transactions)
         vendor_select_options = {v.key: f"{v.label} ({v.transaction_count})" for v in vendors}
 
-        with ui.row().classes("items-center gap-4 flex-wrap w-full"):
+        with ui.row().classes("items-center gap-2 flex-wrap w-full"):
             vendor_select = (
                 ui.select(
                     vendor_select_options, label="Vendors (any of)", multiple=True, value=[], with_input=True
                 )
-                .classes("min-w-[260px]")
+                .classes("min-w-[190px]")
                 .props("use-chips")
             )
             category_select = ui.select(category_options, label="Category", value=None).classes(
-                "min-w-[180px]"
+                "min-w-[150px]"
             )
             source_account_select = (
                 ui.select(
@@ -62,48 +62,86 @@ def budget_builder_page():
                 {f.value: f.value for f in Frequency},
                 label="Averaging interval",
                 value=Frequency.MONTHLY.value,
-            ).classes("min-w-[160px]")
+            ).classes("min-w-[140px]")
 
-        with ui.row().classes("items-center gap-4 flex-wrap w-full"):
+        with ui.row().classes("items-center gap-2 flex-wrap w-full"):
             from_input = ui.input("From (optional)").props("type=date").classes("w-40")
             to_input = ui.input("To (optional)").props("type=date").classes("w-40")
             ui.label("Leave blank to use the full history of whatever matches above.").style(
                 f"color: {TEXT_MUTED}; font-size: 12px;"
             )
 
-        result_container = ui.column().classes("w-full gap-2")
+        with ui.row().classes("w-full gap-4 items-start"):
+            result_container = ui.column().classes("flex-1 gap-2")
 
-        with ui.column().classes("w-full gap-2 section-card") as add_form:
-            ui.label("Add as Budget Line").classes("text-lg font-bold")
-            with ui.row().classes("items-center gap-3 flex-wrap w-full"):
-                desc_input = ui.input("Description").classes("min-w-[220px]")
-                amount_input = ui.number("Amount", value=0.0, format="%.2f").classes("w-32")
-                line_frequency_select = ui.select(
-                    {f.value: f.value for f in Frequency}, label="Frequency", value=Frequency.MONTHLY.value
-                ).classes("w-36")
-                flow_select = ui.select(
-                    {ft.value: ft.value for ft in FlowType},
-                    label="Type",
-                    value=FlowType.EXPENSE.value,
-                ).classes("w-32")
-                budget_category_input = ui.select(
-                    sorted({c.name for c in categories}),
-                    label="Category",
-                    with_input=True,
-                    new_value_mode="add-unique",
-                ).classes("min-w-[160px]")
-                target_account_select = ui.select(
-                    account_options, label="Target account", value=None
-                ).classes("min-w-[180px]")
-                from_date_input = ui.input("Effective From", value=dt.date.today().isoformat()).props(
-                    "type=date"
+            with ui.column().classes("w-96 gap-2 section-card"):
+                with ui.column().classes("w-full gap-2") as add_form:
+                    ui.label("Add as Budget Line").classes("text-lg font-bold")
+                    desc_input = ui.input("Description").classes("w-full")
+                    amount_input = ui.number("Amount", value=0.0, format="%.2f").classes("w-full")
+                    line_frequency_select = ui.select(
+                        {f.value: f.value for f in Frequency},
+                        label="Frequency",
+                        value=Frequency.MONTHLY.value,
+                    ).classes("w-full")
+                    flow_select = ui.select(
+                        {ft.value: ft.value for ft in FlowType},
+                        label="Type",
+                        value=FlowType.EXPENSE.value,
+                    ).classes("w-full")
+                    budget_category_input = ui.select(
+                        sorted({c.name for c in categories}),
+                        label="Category",
+                        with_input=True,
+                        new_value_mode="add-unique",
+                    ).classes("w-full")
+                    target_account_select = ui.select(
+                        account_options, label="Target account", value=None
+                    ).classes("w-full")
+                    from_date_input = (
+                        ui.input("Effective From", value=dt.date.today().isoformat())
+                        .props("type=date")
+                        .classes("w-full")
+                    )
+                    ui.button("+ Add Budget Line", on_click=lambda: add_budget_line()).classes("w-full")
+                add_form.set_visibility(False)
+
+                ui.separator()
+                ui.label("All Budget Lines").classes("text-lg font-bold")
+                all_lines_table = ui.table(
+                    columns=[
+                        {"name": "status", "label": "", "field": "status", "align": "left"},
+                        {
+                            "name": "description",
+                            "label": "Description",
+                            "field": "description",
+                            "align": "left",
+                        },
+                        {"name": "category", "label": "Category", "field": "category", "align": "left"},
+                        {"name": "amount", "label": "Amount", "field": "amount", "align": "right"},
+                        {
+                            "name": "frequency",
+                            "label": "Frequency",
+                            "field": "frequency",
+                            "align": "left",
+                        },
+                        {"name": "account", "label": "Account", "field": "account", "align": "left"},
+                    ],
+                    rows=[],
+                    row_key="id",
+                    pagination=8,
+                ).classes("w-full")
+                all_lines_table.add_slot(
+                    "body-cell-status",
+                    """
+                    <q-td :props="props">
+                        <q-badge v-if="props.value" color="primary" :label="props.value" />
+                    </q-td>
+                    """,
                 )
-            add_button = ui.button("+ Add Budget Line", on_click=lambda: add_budget_line())
-        add_form.set_visibility(False)
-
-        added_container = ui.column().classes("w-full gap-1")
 
         current_aggregate = {"value": None}
+        added_item_ids: set[int] = set()
         line_frequency_state = {"value": Frequency.MONTHLY.value}
 
         def _stat(title: str, value: str, color: str | None = None) -> None:
@@ -211,21 +249,23 @@ def budget_builder_page():
                 amount_input.value = round(rescaled, 2)
             line_frequency_state["value"] = line_frequency_select.value
 
-        def render_added():
-            added_container.clear()
-            if not added_items:
-                return
-            with added_container:
-                ui.label("Added this session").classes("font-bold mt-2")
-                for entry in added_items:
-                    with ui.row().classes("w-full items-center gap-2"):
-                        ui.label(entry["description"]).style("width: 200px;")
-                        ui.label(_money(entry["amount"])).style("width: 100px;")
-                        ui.label(entry["frequency"]).style("width: 110px;")
-                        ui.label(entry["account"]).style(f"flex: 1; color: {TEXT_MUTED};")
-                        ui.link("View in Budget Items", "/budget-items").style("font-size: 12px;")
-
-        added_items: list[dict] = []
+        def refresh_budget_lines():
+            items = session.query(BudgetItem).all()
+            all_lines_table.rows = [
+                {
+                    "id": item.id,
+                    "status": "New" if item.id in added_item_ids else "",
+                    "description": item.description,
+                    "category": item.category.name if item.category else "—",
+                    "amount": _money(item.amount),
+                    "frequency": item.frequency.value,
+                    "account": item.account.name,
+                }
+                for item in sorted(
+                    items, key=lambda i: (i.id not in added_item_ids, i.account.name, i.description)
+                )
+            ]
+            all_lines_table.update()
 
         def add_budget_line():
             aggregate = current_aggregate["value"]
@@ -256,15 +296,8 @@ def budget_builder_page():
             )
             session.add(item)
             session.commit()
-            added_items.append(
-                {
-                    "description": description,
-                    "amount": item.amount,
-                    "frequency": line_frequency.value,
-                    "account": account_options[target_account_select.value],
-                }
-            )
-            render_added()
+            added_item_ids.add(item.id)
+            refresh_budget_lines()
             ui.notify(f"Added “{description}” as a budget line.", type="positive")
 
         vendor_select.on_value_change(lambda e: recompute())
@@ -274,3 +307,5 @@ def budget_builder_page():
         line_frequency_select.on_value_change(lambda e: on_line_frequency_changed())
         from_input.on_value_change(lambda e: recompute())
         to_input.on_value_change(lambda e: recompute())
+
+        refresh_budget_lines()

@@ -31,7 +31,7 @@ def cashflow_page():
         month_start = today.replace(day=1)
         month_end = (month_start.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
 
-        with ui.row().classes("items-center gap-4 flex-wrap"):
+        with ui.row().classes("items-center gap-2 flex-wrap"):
             start_input = ui.input("Start", value=month_start.isoformat()).props("type=date")
             end_input = ui.input("End", value=month_end.isoformat()).props("type=date")
             account_select = ui.select(

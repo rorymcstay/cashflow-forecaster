@@ -24,7 +24,7 @@ def investment_sim_page():
         accounts = [a for a in session.query(Account).order_by(Account.name).all() if a.holdings]
         account_options = {a.id: f"{a.name} ({', '.join(h.ticker for h in a.holdings)})" for a in accounts}
 
-        with ui.row().classes("items-center gap-4 flex-wrap"):
+        with ui.row().classes("items-center gap-2 flex-wrap"):
             account_select = ui.select(
                 account_options, label="Account", value=next(iter(account_options), None)
             )
@@ -41,7 +41,7 @@ def investment_sim_page():
         plot = ui.plotly({}).classes("w-full")
 
         ui.label("Scenario Grid").classes("text-xl font-bold mt-2")
-        with ui.row().classes("items-center gap-4"):
+        with ui.row().classes("items-center gap-2"):
             grid_mode_select = ui.select(GRID_MODES, label="Scenario grid", value="return_vol")
             ui.button("Run Grid", on_click=lambda: run_grid())
         ui.label("Each cell: median ending balance (median worst peak-to-trough drawdown)").style(

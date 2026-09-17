@@ -52,6 +52,15 @@ ui.add_head_html(
 )
 
 
+# Applied once at import time (class-level defaults, not per-client state)
+# so every input/select/number field across every page renders at Quasar's
+# "dense" density — noticeably tighter filter bars without touching every
+# page's individual widget calls.
+ui.input.default_props("dense")
+ui.select.default_props("dense")
+ui.number.default_props("dense")
+
+
 def _apply_theme() -> None:
     """Dark mode + Quasar color overrides are per-client state, so unlike the
     head CSS above these must be (re-)applied on every page visit."""

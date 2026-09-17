@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLineEdit, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget
 
 from app.ui import theme
 
@@ -150,6 +150,15 @@ class AccountMultiSelect(QPushButton):
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(4, 4, 4, 4)
 
+        # Only worth showing once the list is long enough that scrolling to
+        # find one item by eye stops being faster than typing a few letters.
+        search_edit = None
+        if len(self._order) > 8:
+            search_edit = QLineEdit(popup)
+            search_edit.setPlaceholderText(f"Search {self.noun_plural}…")
+            search_edit.setClearButtonEnabled(True)
+            layout.addWidget(search_edit)
+
         list_widget = QListWidget(popup)
         list_widget.setFrameShape(QListWidget.Shape.NoFrame)
         for account_id in self._order:
@@ -172,6 +181,19 @@ class AccountMultiSelect(QPushButton):
 
         list_widget.itemChanged.connect(on_item_changed)
         layout.addWidget(list_widget)
-        popup.setMinimumWidth(max(self.width(), 180))
+
+        if search_edit is not None:
+
+            def apply_filter(text: str) -> None:
+                needle = text.strip().lower()
+                for row in range(list_widget.count()):
+                    item = list_widget.item(row)
+                    item.setHidden(bool(needle) and needle not in item.text().lower())
+
+            search_edit.textChanged.connect(apply_filter)
+
+        popup.setMinimumWidth(max(self.width(), 220))
         popup.move(self.mapToGlobal(self.rect().bottomLeft()))
         popup.show()
+        if search_edit is not None:
+            search_edit.setFocus()

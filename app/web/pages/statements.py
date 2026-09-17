@@ -302,7 +302,7 @@ def statements_page():
         ui.label("Missing Statements").classes("text-xl font-bold mt-2")
         all_accounts = session.query(Account).order_by(Account.name).all()
         accounts_with_history = {row[0] for row in session.query(Statement.account_id).distinct().all()}
-        with ui.row().classes("items-center gap-4 flex-wrap"):
+        with ui.row().classes("items-center gap-2 flex-wrap"):
             gap_account_select = (
                 ui.select(
                     {a.id: a.name for a in all_accounts},
@@ -310,7 +310,7 @@ def statements_page():
                     multiple=True,
                     value=[a.id for a in all_accounts if a.id in accounts_with_history],
                 )
-                .classes("min-w-[220px]")
+                .classes("min-w-[190px]")
                 .props("use-chips")
             )
             gap_start_input = ui.input(

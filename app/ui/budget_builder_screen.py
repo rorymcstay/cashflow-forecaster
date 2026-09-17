@@ -2,6 +2,7 @@ import datetime as dt
 from types import SimpleNamespace
 
 from PySide6.QtCore import QDate, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -67,6 +69,7 @@ class BudgetBuilderScreen(QWidget):
         self._vendors: list = []
         self._current_aggregate: SpendAggregate | None = None
         self._line_frequency: Frequency = Frequency.MONTHLY
+        self._added_item_ids: set[int] = set()
 
         outer = QVBoxLayout(self)
         outer.addWidget(QLabel("<h2>Budget Builder</h2>"))
@@ -124,7 +127,9 @@ class BudgetBuilderScreen(QWidget):
         range_row.addStretch()
         outer.addLayout(range_row)
 
-        # -- results ----------------------------------------------------------
+        # -- results / add-line split -------------------------------------------
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
         results_scroll = QScrollArea()
         results_scroll.setWidgetResizable(True)
@@ -132,71 +137,81 @@ class BudgetBuilderScreen(QWidget):
         results_inner = QWidget()
         self.results_layout = QVBoxLayout(results_inner)
         results_scroll.setWidget(results_inner)
-        outer.addWidget(results_scroll, stretch=1)
+        splitter.addWidget(results_scroll)
         self._render_no_results("Choose a vendor and/or category to aggregate.")
 
-        # -- add-as-budget-line form -------------------------------------------
+        # -- right pane: add-as-budget-line form + full budget line list --------
 
-        self.add_form = QFrame()
-        self.add_form.setStyleSheet(
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setMinimumWidth(340)
+        right_inner = QFrame()
+        right_inner.setStyleSheet(
             f"background-color: {theme.SURFACE}; border: 1px solid {theme.BORDER}; border-radius: 8px;"
         )
+        right_layout = QVBoxLayout(right_inner)
+
+        self.add_form = QWidget()
         add_form_layout = QVBoxLayout(self.add_form)
+        add_form_layout.setContentsMargins(0, 0, 0, 0)
         add_form_layout.addWidget(QLabel("<b>Add as Budget Line</b>"))
-        add_row = QHBoxLayout()
-        add_row.addWidget(QLabel("Description:"))
+        add_form_layout.addWidget(QLabel("Description:"))
         self.desc_edit = QLineEdit()
-        add_row.addWidget(self.desc_edit)
-        add_row.addWidget(QLabel("Amount:"))
+        add_form_layout.addWidget(self.desc_edit)
+        add_form_layout.addWidget(QLabel("Amount:"))
         self.amount_spin = _amount_spinbox()
-        add_row.addWidget(self.amount_spin)
-        add_row.addWidget(QLabel("Frequency:"))
+        add_form_layout.addWidget(self.amount_spin)
+        add_form_layout.addWidget(QLabel("Frequency:"))
         self.frequency_combo = QComboBox()
         for f in Frequency:
             self.frequency_combo.addItem(f.value, f)
         self.frequency_combo.setCurrentIndex(self.frequency_combo.findData(Frequency.MONTHLY))
-        add_row.addWidget(self.frequency_combo)
-        add_row.addWidget(QLabel("Type:"))
+        add_form_layout.addWidget(self.frequency_combo)
+        add_form_layout.addWidget(QLabel("Type:"))
         self.flow_combo = QComboBox()
         for ft in FlowType:
             if ft != FlowType.TRANSFER:
                 self.flow_combo.addItem(ft.value, ft)
-        add_row.addWidget(self.flow_combo)
-        add_row.addWidget(QLabel("Category:"))
+        add_form_layout.addWidget(self.flow_combo)
+        add_form_layout.addWidget(QLabel("Category:"))
         self.budget_category_combo = QComboBox()
         self.budget_category_combo.setEditable(True)
         for c in session.query(Category).order_by(Category.name).all():
             self.budget_category_combo.addItem(c.name)
-        add_row.addWidget(self.budget_category_combo)
-        add_row.addWidget(QLabel("Target account:"))
+        add_form_layout.addWidget(self.budget_category_combo)
+        add_form_layout.addWidget(QLabel("Target account:"))
         self.target_account_combo = QComboBox()
-        add_row.addWidget(self.target_account_combo)
-        add_row.addWidget(QLabel("Effective From:"))
+        add_form_layout.addWidget(self.target_account_combo)
+        add_form_layout.addWidget(QLabel("Effective From:"))
         self.effective_from_edit = QDateEdit(QDate.currentDate())
         self.effective_from_edit.setCalendarPopup(True)
-        add_row.addWidget(self.effective_from_edit)
-        add_form_layout.addLayout(add_row)
+        add_form_layout.addWidget(self.effective_from_edit)
 
-        add_btn_row = QHBoxLayout()
-        add_btn_row.addStretch()
         self.add_button = QPushButton("+ Add Budget Line")
         self.add_button.setObjectName("primaryButton")
         self.add_button.clicked.connect(self._add_budget_line)
-        add_btn_row.addWidget(self.add_button)
-        add_form_layout.addLayout(add_btn_row)
+        add_form_layout.addWidget(self.add_button)
 
-        outer.addWidget(self.add_form)
+        right_layout.addWidget(self.add_form)
         self.add_form.setVisible(False)
 
-        outer.addWidget(QLabel("<b>Added this session</b>"))
-        self.added_table = QTableWidget()
-        self.added_table.setColumnCount(4)
-        self.added_table.setHorizontalHeaderLabels(["Description", "Amount", "Frequency", "Account"])
-        self.added_table.horizontalHeader().setStretchLastSection(True)
-        self.added_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.added_table.verticalHeader().setVisible(False)
-        self.added_table.setMaximumHeight(160)
-        outer.addWidget(self.added_table)
+        right_layout.addWidget(QLabel("<b>All Budget Lines</b>"))
+        self.all_lines_table = QTableWidget()
+        self.all_lines_table.setColumnCount(6)
+        self.all_lines_table.setHorizontalHeaderLabels(
+            ["", "Description", "Category", "Amount", "Frequency", "Account"]
+        )
+        self.all_lines_table.horizontalHeader().setStretchLastSection(True)
+        self.all_lines_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.all_lines_table.verticalHeader().setVisible(False)
+        right_layout.addWidget(self.all_lines_table, stretch=1)
+
+        right_scroll.setWidget(right_inner)
+        splitter.addWidget(right_scroll)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([760, 420])
+        outer.addWidget(splitter, stretch=1)
 
         self.vendor_select.selectionChanged.connect(self._recompute)
         self.category_combo.currentIndexChanged.connect(self._recompute)
@@ -236,6 +251,7 @@ class BudgetBuilderScreen(QWidget):
         ]
         self.vendor_select.set_accounts(vendor_items, default_all_checked=False)
         self._recompute()
+        self._refresh_budget_lines()
 
     # -- filters -------------------------------------------------------------
 
@@ -431,12 +447,34 @@ class BudgetBuilderScreen(QWidget):
         self.session.add(item)
         self.session.commit()
 
-        row = self.added_table.rowCount()
-        self.added_table.insertRow(row)
-        self.added_table.setItem(row, 0, QTableWidgetItem(description))
-        self.added_table.setItem(row, 1, QTableWidgetItem(f"£{item.amount:,.2f}"))
-        self.added_table.setItem(row, 2, QTableWidgetItem(line_frequency.value))
-        self.added_table.setItem(row, 3, QTableWidgetItem(self.target_account_combo.currentText()))
+        self._added_item_ids.add(item.id)
+        self._refresh_budget_lines()
 
         if self.on_change:
             self.on_change()
+
+    def _refresh_budget_lines(self):
+        items = self.session.query(BudgetItem).all()
+        items.sort(key=lambda i: (i.id not in self._added_item_ids, i.account.name, i.description))
+        self.all_lines_table.setRowCount(0)
+        for item in items:
+            row = self.all_lines_table.rowCount()
+            self.all_lines_table.insertRow(row)
+            is_new = item.id in self._added_item_ids
+            status_item = QTableWidgetItem("New" if is_new else "")
+            if is_new:
+                status_item.setForeground(QColor(theme.ACCENT))
+                font = status_item.font()
+                font.setBold(True)
+                status_item.setFont(font)
+            self.all_lines_table.setItem(row, 0, status_item)
+            self.all_lines_table.setItem(row, 1, QTableWidgetItem(item.description))
+            self.all_lines_table.setItem(
+                row, 2, QTableWidgetItem(item.category.name if item.category else "—")
+            )
+            amount_item = QTableWidgetItem(f"£{item.amount:,.2f}")
+            amount_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.all_lines_table.setItem(row, 3, amount_item)
+            self.all_lines_table.setItem(row, 4, QTableWidgetItem(item.frequency.value))
+            self.all_lines_table.setItem(row, 5, QTableWidgetItem(item.account.name))
+        self.all_lines_table.resizeColumnsToContents()
