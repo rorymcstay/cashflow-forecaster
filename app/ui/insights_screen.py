@@ -112,6 +112,11 @@ class InsightsScreen(QWidget):
         self.ma_spin.valueChanged.connect(self.refresh)
         controls2.addWidget(self.ma_spin)
 
+        self.show_actual_check = QCheckBox("Show Actual")
+        self.show_actual_check.setChecked(True)
+        self.show_actual_check.toggled.connect(self.refresh)
+        controls2.addWidget(self.show_actual_check)
+
         self.show_ma_check = QCheckBox("Show Moving Average")
         self.show_ma_check.setChecked(True)
         self.show_ma_check.toggled.connect(self.refresh)
@@ -276,6 +281,7 @@ class InsightsScreen(QWidget):
         group_by = self.group_by_combo.currentText()
         granularity = self.granularity_combo.currentText()
         ma_window = self.ma_spin.value()
+        show_actual = self.show_actual_check.isChecked()
         show_ma = self.show_ma_check.isChecked()
         show_forecast = self.show_forecast_check.isChecked()
 
@@ -297,16 +303,17 @@ class InsightsScreen(QWidget):
         all_values: list[float] = []
         for i, (label, s) in enumerate(series_by_value):
             color = SERIES_COLORS[i % len(SERIES_COLORS)]
-            specs.append(
-                (
-                    f"{label} — Actual",
-                    [QPointF(_to_msecs(d), v) for d, v in zip(s.bucket_starts, s.actual)],
-                    color,
-                    Qt.PenStyle.SolidLine,
-                    2.0,
+            if show_actual:
+                specs.append(
+                    (
+                        f"{label} — Actual",
+                        [QPointF(_to_msecs(d), v) for d, v in zip(s.bucket_starts, s.actual)],
+                        color,
+                        Qt.PenStyle.SolidLine,
+                        2.0,
+                    )
                 )
-            )
-            all_values += s.actual
+                all_values += s.actual
             if show_ma:
                 specs.append(
                     (

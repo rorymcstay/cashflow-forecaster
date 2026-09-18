@@ -48,6 +48,7 @@ def insights_page():
             ).classes("min-w-[220px]")
 
         with ui.row().classes("items-center gap-2 flex-wrap"):
+            show_actual_check = ui.checkbox("Show Actual", value=True)
             show_ma_check = ui.checkbox("Show Moving Average", value=True)
             show_forecast_check = ui.checkbox("Show Forecast", value=True)
             start_input = ui.input("Start", value=(today.replace(year=today.year - 1)).isoformat()).props(
@@ -146,15 +147,16 @@ def insights_page():
             fig = go.Figure()
             for i, (label, series) in enumerate(series_by_value):
                 color = SERIES_COLORS[i % len(SERIES_COLORS)]
-                fig.add_trace(
-                    go.Scatter(
-                        x=series.bucket_starts,
-                        y=series.actual,
-                        mode="lines",
-                        name=f"{label} — Actual",
-                        line=dict(color=color, width=1.5),
+                if show_actual_check.value:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=series.bucket_starts,
+                            y=series.actual,
+                            mode="lines",
+                            name=f"{label} — Actual",
+                            line=dict(color=color, width=1.5),
+                        )
                     )
-                )
                 if show_ma_check.value:
                     fig.add_trace(
                         go.Scatter(
@@ -210,6 +212,7 @@ def insights_page():
             granularity_select,
             ma_input,
             account_select,
+            show_actual_check,
             show_ma_check,
             show_forecast_check,
             start_input,
