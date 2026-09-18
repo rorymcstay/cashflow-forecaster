@@ -5,6 +5,7 @@ from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -70,11 +71,9 @@ class MainWindow(QMainWindow):
 
         self._screens = [
             (self.dashboard_screen, "Dashboard"),
-            (self.accounts_screen, "Accounts"),
             (self.cashflow_screen, "Cash Flow Forecast"),
             (self.insights_screen, "Insights"),
             (self.scenario_screen, "Scenarios"),
-            (self.budgets_screen, "Budgets"),
             (self.budget_items_screen, "Budget Items"),
             (self.budget_builder_screen, "Budget Builder"),
             (self.vendor_groups_screen, "Vendor Groups"),
@@ -84,22 +83,58 @@ class MainWindow(QMainWindow):
             (self.budget_view_screen, "Budget"),
             (self.investment_sim_screen, "Investment Simulation"),
         ]
+        # Pinned to the bottom of the sidebar, below a separator — account
+        # and budget switching are cross-cutting concerns you reach for
+        # from anywhere, not just another screen in the main list.
+        self._pinned_screens = [
+            (self.accounts_screen, "Accounts"),
+            (self.budgets_screen, "Budgets"),
+        ]
+
+        self.stack = QStackedWidget()
+        for screen, _ in self._screens + self._pinned_screens:
+            self.stack.addWidget(screen)
 
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("SidebarNav")
-        self.nav_list.setFixedWidth(SIDEBAR_WIDTH)
-
-        self.stack = QStackedWidget()
-        for screen, title in self._screens:
+        for _, title in self._screens:
             self.nav_list.addItem(title)
-            self.stack.addWidget(screen)
-        self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet(f"background-color: {theme.BORDER}; max-height: 1px; border: none;")
+
+        self.pinned_nav_list = QListWidget()
+        self.pinned_nav_list.setObjectName("SidebarNav")
+        self.pinned_nav_list.setFrameShape(QFrame.Shape.NoFrame)
+        for _, title in self._pinned_screens:
+            self.pinned_nav_list.addItem(title)
+        self.pinned_nav_list.setFixedHeight(
+            self.pinned_nav_list.sizeHintForRow(0) * len(self._pinned_screens) + 4
+        )
+
+        # Both lists (and the initial selection below) must exist before
+        # either signal is connected — _on_main_nav_changed/_on_pinned_nav_changed
+        # each reach across to the other list, which doesn't exist yet
+        # while the lists are still being constructed above.
         self.nav_list.setCurrentRow(0)
+        self.nav_list.currentRowChanged.connect(self._on_main_nav_changed)
+        self.pinned_nav_list.currentRowChanged.connect(self._on_pinned_nav_changed)
+
+        sidebar = QWidget()
+        sidebar.setFixedWidth(SIDEBAR_WIDTH)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(0)
+        sidebar_layout.addWidget(self.nav_list, stretch=1)
+        sidebar_layout.addWidget(separator)
+        sidebar_layout.addWidget(self.pinned_nav_list)
+        self.sidebar = sidebar
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
-        body.addWidget(self.nav_list)
+        body.addWidget(self.sidebar)
         body.addWidget(self.stack, stretch=1)
         central_layout.addLayout(body)
 
@@ -151,7 +186,23 @@ class MainWindow(QMainWindow):
 
     def _toggle_sidebar(self):
         self._sidebar_visible = not self._sidebar_visible
-        self.nav_list.setVisible(self._sidebar_visible)
+        self.sidebar.setVisible(self._sidebar_visible)
+
+    def _on_main_nav_changed(self, row: int):
+        if row < 0:
+            return
+        self.pinned_nav_list.blockSignals(True)
+        self.pinned_nav_list.setCurrentRow(-1)
+        self.pinned_nav_list.blockSignals(False)
+        self.stack.setCurrentIndex(row)
+
+    def _on_pinned_nav_changed(self, row: int):
+        if row < 0:
+            return
+        self.nav_list.blockSignals(True)
+        self.nav_list.setCurrentRow(-1)
+        self.nav_list.blockSignals(False)
+        self.stack.setCurrentIndex(len(self._screens) + row)
 
     def _reload_budget_select(self):
         active = get_active_budget(self.session)

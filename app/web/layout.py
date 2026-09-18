@@ -22,19 +22,25 @@ SUCCESS = "#34D399"
 
 NAV_ITEMS = [
     ("/", "Dashboard"),
-    ("/accounts", "Accounts"),
     ("/cashflow", "Cash Flow Forecast"),
     ("/insights", "Insights"),
     ("/scenarios", "Scenarios"),
     ("/budget-items", "Budget Items"),
     ("/budget-builder", "Budget Builder"),
     ("/vendor-groups", "Vendor Groups"),
-    ("/budgets", "Budgets"),
     ("/upcoming-expenses", "Upcoming Expenses"),
     ("/statements", "Statements"),
     ("/transactions", "Transactions"),
     ("/budget", "Budget"),
     ("/investment-sim", "Investment Simulation"),
+]
+
+# Pinned to the bottom of the sidebar, below a separator — account and
+# budget switching are cross-cutting concerns you reach for from anywhere,
+# not just another page in the main list.
+PINNED_NAV_ITEMS = [
+    ("/accounts", "Accounts"),
+    ("/budgets", "Budgets"),
 ]
 
 # Registered once at import time with shared=True, so NiceGUI injects it into
@@ -96,11 +102,16 @@ def page_shell(active_path: str, title: str):
     drawer = ui.left_drawer(value=True, bordered=True).style(
         f"background-color: {SURFACE}; border-right: 1px solid {BORDER};"
     )
-    with drawer:
-        ui.label("Budgeting").classes("text-lg font-bold px-4 pt-2 pb-1").style(f"color: {TEXT};")
-        for path, label in NAV_ITEMS:
-            classes = "nav-link" + (" nav-link-active" if path == active_path else "")
-            ui.link(label, path).classes(classes)
+    with drawer, ui.column().classes("h-full w-full justify-between gap-0"):
+        with ui.column().classes("w-full gap-0"):
+            ui.label("Budgeting").classes("text-lg font-bold px-4 pt-2 pb-1").style(f"color: {TEXT};")
+            for path, label in NAV_ITEMS:
+                classes = "nav-link" + (" nav-link-active" if path == active_path else "")
+                ui.link(label, path).classes(classes)
+        with ui.column().classes("w-full gap-0").style(f"border-top: 1px solid {BORDER};"):
+            for path, label in PINNED_NAV_ITEMS:
+                classes = "nav-link" + (" nav-link-active" if path == active_path else "")
+                ui.link(label, path).classes(classes)
 
     budget_session = get_session()
     try:
