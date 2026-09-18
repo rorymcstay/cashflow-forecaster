@@ -95,7 +95,7 @@ def upcoming_expenses_page():
             account_options = {a.id: a.name for a in accounts}
             categories = sorted({c.name for c in session.query(Category).all()})
 
-            with ui.dialog() as dialog, ui.card().classes("gap-2 min-w-[420px]"):
+            with ui.dialog() as dialog, ui.card().classes("gap-2 w-full max-w-[420px]"):
                 ui.label("Edit Upcoming Expense" if item else "Add Upcoming Expense").classes(
                     "text-lg font-bold"
                 )

@@ -132,7 +132,7 @@ def accounts_page():
             ]
             payee_options = {a.id: a.name for a in other_accounts}
 
-            with ui.dialog() as dialog, ui.card().classes("gap-2 min-w-[420px]"):
+            with ui.dialog() as dialog, ui.card().classes("gap-2 w-full max-w-[420px]"):
                 ui.label("Edit Account" if account else "Add Account").classes("text-lg font-bold")
                 name_input = ui.input("Name", value=account.name if account else "")
                 balance_input = ui.number(

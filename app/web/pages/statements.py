@@ -382,7 +382,7 @@ def statements_page():
 
         def reclassify(transaction: Transaction):
             categories = sorted({c.name for c in session.query(Category).all()})
-            with ui.dialog() as dialog, ui.card().classes("gap-2 min-w-[360px]"):
+            with ui.dialog() as dialog, ui.card().classes("gap-2 w-full max-w-[360px]"):
                 ui.label("Reclassify Transaction").classes("text-lg font-bold")
                 ui.label(transaction.description)
                 ui.label(_money(transaction.amount))

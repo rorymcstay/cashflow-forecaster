@@ -87,10 +87,26 @@ def page_shell(active_path: str, title: str):
         .style(f"background-color: {SURFACE}; border-bottom: 1px solid {BORDER};")
     ):
         ui.label("Budgeting").classes("text-lg font-bold").style(f"color: {TEXT};")
-        with ui.row().classes("gap-1 ml-6"):
+
+        # Full link row on wide screens; 11 links wrap or overflow badly on a
+        # phone, so below the md breakpoint it collapses into a menu button
+        # instead — same destinations, just reached one tap deeper.
+        with ui.row().classes("gap-1 ml-6 hidden md:flex"):
             for path, label in NAV_ITEMS:
                 classes = "nav-link" + (" nav-link-active" if path == active_path else "")
                 ui.link(label, path).classes(classes)
-    with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-4") as content:
+
+        with (
+            ui.element("div").classes("ml-auto flex md:hidden"),
+            ui.button(icon="menu").props("flat round dense color=white"),
+            ui.menu().style(f"background-color: {SURFACE}; border: 1px solid {BORDER};"),
+        ):
+            for path, label in NAV_ITEMS:
+                item = ui.menu_item(label, on_click=lambda path=path: ui.navigate.to(path))
+                item.style(
+                    f"color: {TEXT if path == active_path else TEXT_MUTED};"
+                    + ("font-weight: 600;" if path == active_path else "")
+                )
+    with ui.column().classes("w-full max-w-6xl mx-auto p-2 sm:p-4 gap-4") as content:
         ui.label(title).classes("text-2xl font-bold").style(f"color: {TEXT};")
         yield content

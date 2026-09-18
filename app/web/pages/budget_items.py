@@ -66,7 +66,7 @@ def budget_items_page():
             account_options = {a.id: a.name for a in accounts}
             categories = sorted({c.name for c in session.query(Category).all()})
 
-            with ui.dialog() as dialog, ui.card().classes("gap-2 min-w-[420px]"):
+            with ui.dialog() as dialog, ui.card().classes("gap-2 w-full max-w-[420px]"):
                 ui.label("Edit Budget Item" if item else "Add Budget Item").classes("text-lg font-bold")
                 desc_input = ui.input("Description", value=item.description if item else "")
                 amount_input = ui.number("Amount", value=item.amount if item else 0.0, format="%.2f")

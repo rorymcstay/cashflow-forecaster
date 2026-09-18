@@ -167,8 +167,8 @@ def transactions_page():
             summary_tab = ui.tab("Summary")
 
         with ui.tab_panels(page_tabs, value=table_tab).classes("w-full"):
-            with ui.tab_panel(table_tab), ui.row().classes("w-full gap-4 items-start"):
-                with ui.column().classes("flex-1 gap-1"):
+            with ui.tab_panel(table_tab), ui.row().classes("w-full gap-4 items-start flex-col md:flex-row"):
+                with ui.column().classes("w-full md:flex-1 gap-1"):
                     grid = (
                         ui.aggrid(
                             {
@@ -252,7 +252,7 @@ def transactions_page():
                     )
                     selection_label = ui.label("No rows selected").style(f"color: {TEXT_MUTED};")
 
-                with ui.column().classes("w-96 gap-2 section-card"):
+                with ui.column().classes("w-full md:w-96 gap-2 section-card"):
                     detail_container = ui.column().classes("w-full gap-2")
                     with detail_container:
                         ui.label("Click a transaction to see details here.").style(f"color: {TEXT_MUTED};")
@@ -266,10 +266,10 @@ def transactions_page():
                     count_stat = _stat_card("Transactions")
 
                 with ui.row().classes("w-full gap-4 items-start flex-wrap"):
-                    with ui.column().classes("flex-1 min-w-[360px] gap-1"):
+                    with ui.column().classes("w-full md:flex-1 md:min-w-[360px] gap-1"):
                         ui.label("Spend by Category").classes("text-lg font-bold")
                         category_plot = ui.plotly({}).classes("w-full").style("height: 320px;")
-                    with ui.column().classes("flex-1 min-w-[320px] gap-1"):
+                    with ui.column().classes("w-full md:flex-1 md:min-w-[320px] gap-1"):
                         ui.label("Top Merchants").classes("text-lg font-bold")
                         merchants_table = ui.table(
                             columns=[
@@ -409,7 +409,7 @@ def transactions_page():
             account_options = {a.id: a.name for a in session.query(Account).order_by(Account.name).all()}
             categories = sorted({c.name for c in session.query(Category).all()})
 
-            with ui.dialog() as dialog, ui.card().classes("gap-2 min-w-[420px]"):
+            with ui.dialog() as dialog, ui.card().classes("gap-2 w-full max-w-[420px]"):
                 ui.label("Add Budget Item").classes("text-lg font-bold")
                 desc_input = ui.input("Description", value=transaction.description)
                 amount_input = ui.number("Amount", value=abs(transaction.amount), format="%.2f")

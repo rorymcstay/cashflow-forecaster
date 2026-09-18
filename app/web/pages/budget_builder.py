@@ -71,10 +71,10 @@ def budget_builder_page():
                 f"color: {TEXT_MUTED}; font-size: 12px;"
             )
 
-        with ui.row().classes("w-full gap-4 items-start"):
-            result_container = ui.column().classes("flex-1 gap-2")
+        with ui.row().classes("w-full gap-4 items-start flex-col md:flex-row"):
+            result_container = ui.column().classes("w-full md:flex-1 gap-2")
 
-            with ui.column().classes("w-96 gap-2 section-card"):
+            with ui.column().classes("w-full md:w-96 gap-2 section-card"):
                 with ui.column().classes("w-full gap-2") as add_form:
                     ui.label("Add as Budget Line").classes("text-lg font-bold")
                     desc_input = ui.input("Description").classes("w-full")
