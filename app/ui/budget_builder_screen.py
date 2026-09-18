@@ -24,12 +24,22 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy.orm import Session
 
-from app.budget_builder import SpendAggregate, aggregate_spend, vendor_options
+from app.budget_builder import (
+    SpendAggregate,
+    StagedLine,
+    aggregate_spend,
+    commit_staged_line,
+    uncaptured_by_vendor,
+    uncaptured_transactions,
+    vendor_options,
+)
 from app.models import OCCURRENCES_PER_YEAR, Account, BudgetItem, Category, FlowType, Frequency
-from app.seed import get_or_create_category
 from app.transactions import query_transactions
 from app.ui import theme
 from app.ui.widgets import AccountMultiSelect
+
+_UNCAPTURED_LIMIT = 30
+_PREVIEW_LIMIT = 200
 
 
 def _to_pydate(qd: QDate) -> dt.date:
@@ -53,9 +63,14 @@ def _amount_spinbox(initial: float = 0.0) -> QDoubleSpinBox:
 class BudgetBuilderScreen(QWidget):
     """Suggested Budget Builder: aggregate historical spend by vendor and/or
     category across one or more source accounts, see what it averages out to
-    per period, and commit that figure as a BudgetItem on any target account
+    per period, and stage that figure as a budget line on any target account
     — e.g. Uber on the Amex averaged monthly, or Holiday spend across every
-    account averaged every 6 months and applied to one card.
+    account averaged every 6 months and applied to one card. Stage as many
+    lines as you like, then save them all together.
+
+    A single global date range drives every average computed here — whatever
+    it's set to is what gets baked into every line you stage, so there's no
+    risk of one line quietly using a different lookback than the next.
 
     This is the deliberate, user-directed counterpart to
     app/statement_import.py's automatic generate_suggestions.
@@ -69,13 +84,15 @@ class BudgetBuilderScreen(QWidget):
         self._vendors: list = []
         self._current_aggregate: SpendAggregate | None = None
         self._line_frequency: Frequency = Frequency.MONTHLY
-        self._added_item_ids: set[int] = set()
+        self._staged_lines: list[StagedLine] = []
+        self._account_names: dict[int, str] = {}
 
         outer = QVBoxLayout(self)
         outer.addWidget(QLabel("<h2>Budget Builder</h2>"))
         description = QLabel(
             "Pick a vendor and/or category, narrow it to one or more source accounts, and see what it "
-            "averages out to per period — then commit that figure as a budget line on any account."
+            "averages out to per period — then stage it as a budget line on any account. Stage as many "
+            "lines as you like and save them together."
         )
         description.setWordWrap(True)
         description.setStyleSheet(f"color: {theme.TEXT_MUTED};")
@@ -109,6 +126,7 @@ class BudgetBuilderScreen(QWidget):
         outer.addLayout(filters_row)
 
         range_row = QHBoxLayout()
+        range_row.addWidget(QLabel("<b>Global date range</b> (used to compute every line below):"))
         self.from_check = QCheckBox("From")
         self.from_edit = QDateEdit(_to_qdate(dt.date.today() - dt.timedelta(days=365)))
         self.from_edit.setCalendarPopup(True)
@@ -127,7 +145,7 @@ class BudgetBuilderScreen(QWidget):
         range_row.addStretch()
         outer.addLayout(range_row)
 
-        # -- results / add-line split -------------------------------------------
+        # -- results / staging split -------------------------------------------
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -140,11 +158,11 @@ class BudgetBuilderScreen(QWidget):
         splitter.addWidget(results_scroll)
         self._render_no_results("Choose a vendor and/or category to aggregate.")
 
-        # -- right pane: add-as-budget-line form + full budget line list --------
+        # -- right pane: add-line form, staged lines, existing budget items -----
 
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
-        right_scroll.setMinimumWidth(340)
+        right_scroll.setMinimumWidth(360)
         right_inner = QFrame()
         right_inner.setStyleSheet(
             f"background-color: {theme.SURFACE}; border: 1px solid {theme.BORDER}; border-radius: 8px;"
@@ -154,7 +172,7 @@ class BudgetBuilderScreen(QWidget):
         self.add_form = QWidget()
         add_form_layout = QVBoxLayout(self.add_form)
         add_form_layout.setContentsMargins(0, 0, 0, 0)
-        add_form_layout.addWidget(QLabel("<b>Add as Budget Line</b>"))
+        add_form_layout.addWidget(QLabel("<b>Stage as Budget Line</b>"))
         add_form_layout.addWidget(QLabel("Description:"))
         self.desc_edit = QLineEdit()
         add_form_layout.addWidget(self.desc_edit)
@@ -187,19 +205,40 @@ class BudgetBuilderScreen(QWidget):
         self.effective_from_edit.setCalendarPopup(True)
         add_form_layout.addWidget(self.effective_from_edit)
 
-        self.add_button = QPushButton("+ Add Budget Line")
-        self.add_button.setObjectName("primaryButton")
-        self.add_button.clicked.connect(self._add_budget_line)
-        add_form_layout.addWidget(self.add_button)
+        self.vendor_scope_label = QLabel("")
+        self.vendor_scope_label.setWordWrap(True)
+        self.vendor_scope_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        add_form_layout.addWidget(self.vendor_scope_label)
+
+        self.stage_button = QPushButton("+ Stage Budget Line")
+        self.stage_button.setObjectName("primaryButton")
+        self.stage_button.clicked.connect(self._stage_line)
+        add_form_layout.addWidget(self.stage_button)
 
         right_layout.addWidget(self.add_form)
         self.add_form.setVisible(False)
 
-        right_layout.addWidget(QLabel("<b>All Budget Lines</b>"))
+        right_layout.addWidget(QLabel("<b>Staged Lines (not yet saved)</b>"))
+        self.staged_table = QTableWidget()
+        self.staged_table.setColumnCount(8)
+        self.staged_table.setHorizontalHeaderLabels(
+            ["Description", "Vendors", "Category", "Amount", "Frequency", "Account", "Window", ""]
+        )
+        self.staged_table.horizontalHeader().setStretchLastSection(False)
+        self.staged_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.staged_table.verticalHeader().setVisible(False)
+        right_layout.addWidget(self.staged_table)
+
+        self.save_staged_button = QPushButton("Save All Staged Lines")
+        self.save_staged_button.clicked.connect(self._save_staged_lines)
+        self.save_staged_button.setEnabled(False)
+        right_layout.addWidget(self.save_staged_button)
+
+        right_layout.addWidget(QLabel("<b>Existing Budget Items</b>"))
         self.all_lines_table = QTableWidget()
         self.all_lines_table.setColumnCount(6)
         self.all_lines_table.setHorizontalHeaderLabels(
-            ["", "Description", "Category", "Amount", "Frequency", "Account"]
+            ["Description", "Vendors", "Category", "Amount", "Frequency", "Account"]
         )
         self.all_lines_table.horizontalHeader().setStretchLastSection(True)
         self.all_lines_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -210,7 +249,7 @@ class BudgetBuilderScreen(QWidget):
         splitter.addWidget(right_scroll)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        splitter.setSizes([760, 420])
+        splitter.setSizes([760, 460])
         outer.addWidget(splitter, stretch=1)
 
         self.vendor_select.selectionChanged.connect(self._recompute)
@@ -230,6 +269,7 @@ class BudgetBuilderScreen(QWidget):
 
     def reload_accounts(self):
         accounts = self.session.query(Account).order_by(Account.name).all()
+        self._account_names = {a.id: a.name for a in accounts}
         self.source_account_select.set_accounts(accounts)
 
         self.target_account_combo.blockSignals(True)
@@ -251,7 +291,7 @@ class BudgetBuilderScreen(QWidget):
         ]
         self.vendor_select.set_accounts(vendor_items, default_all_checked=False)
         self._recompute()
-        self._refresh_budget_lines()
+        self._refresh_existing_items()
 
     # -- filters -------------------------------------------------------------
 
@@ -264,6 +304,11 @@ class BudgetBuilderScreen(QWidget):
         start = _to_pydate(self.from_edit.date()) if self.from_check.isChecked() else None
         end = _to_pydate(self.to_edit.date()) if self.to_check.isChecked() else None
         return start, end
+
+    def _select_vendor(self, vendor_key: str):
+        """Called from the uncaptured-spend table: narrow the vendor filter
+        to just this one and recompute, so the next stage is a click away."""
+        self.vendor_select.set_checked_ids([vendor_key])
 
     # -- results --------------------------------------------------------------
 
@@ -326,6 +371,7 @@ class BudgetBuilderScreen(QWidget):
         if not aggregate.transactions:
             self._render_no_results("No matching transactions for this combination.")
             self.add_form.setVisible(False)
+            self._render_uncaptured(base)
             return
 
         tiles_row = QHBoxLayout()
@@ -357,7 +403,7 @@ class BudgetBuilderScreen(QWidget):
         preview_table.horizontalHeader().setStretchLastSection(True)
         preview_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         preview_table.verticalHeader().setVisible(False)
-        preview_rows = aggregate.transactions[:200]
+        preview_rows = aggregate.transactions[:_PREVIEW_LIMIT]
         preview_table.setRowCount(len(preview_rows))
         for row, t in enumerate(preview_rows):
             preview_table.setItem(row, 0, QTableWidgetItem(t.date.strftime("%d %b %Y")))
@@ -367,21 +413,23 @@ class BudgetBuilderScreen(QWidget):
             amount_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             preview_table.setItem(row, 3, amount_item)
         preview_table.resizeColumnsToContents()
-        preview_table.setMinimumHeight(260)
+        preview_table.setMinimumHeight(220)
         self.results_layout.addWidget(preview_table)
 
-        # Prefill the add-line form from this aggregate — a fresh group each
+        self._render_uncaptured(base)
+
+        # Prefill the stage form from this aggregate — a fresh group each
         # time you recompute, so overwriting is the expected result.
         vendor_labels = [v.label for v in self._vendors if v.key in (vendor_keys or [])]
         vendor_label = " + ".join(vendor_labels) if vendor_labels else None
         category_label = self.category_combo.currentText() if category_id is not None else None
         self.desc_edit.setText(vendor_label or category_label or "")
         self.amount_spin.setValue(abs(aggregate.average_per_period))
-        # The committed budget line's frequency defaults to whatever interval
-        # was just used to average history, but is independently editable
-        # below (_on_line_frequency_changed rescales the amount rather than
+        # The staged line's frequency defaults to whatever interval was just
+        # used to average history, but is independently editable below
+        # (_on_line_frequency_changed rescales the amount rather than
         # re-running the whole aggregate) — e.g. average annual holiday spend
-        # but commit it as a smoothed monthly line.
+        # but stage it as a smoothed monthly line.
         self.frequency_combo.blockSignals(True)
         idx = self.frequency_combo.findData(interval)
         if idx >= 0:
@@ -401,7 +449,53 @@ class BudgetBuilderScreen(QWidget):
             idx = self.target_account_combo.findData(source_account_ids[0])
             if idx >= 0:
                 self.target_account_combo.setCurrentIndex(idx)
+
+        if vendor_keys and category_id is not None:
+            self.vendor_scope_label.setText(
+                f"Scoped to {len(vendor_keys)} vendor(s) — other {category_label} transactions stay "
+                "uncaptured."
+            )
+        elif vendor_keys:
+            self.vendor_scope_label.setText(f"Scoped to {len(vendor_keys)} vendor(s), any category.")
+        else:
+            self.vendor_scope_label.setText(f"Whole category ({category_label}) — every vendor in it.")
         self.add_form.setVisible(True)
+
+    def _render_uncaptured(self, base: list):
+        """Below the matching-transactions preview: whichever of `base` (the
+        same account/category/date scope, but *not* narrowed by the vendor
+        filter) has no covering budget item yet — ranked by spend, so it
+        doubles as a shortlist of what to build a line for next."""
+        rows = uncaptured_by_vendor(uncaptured_transactions(self.session, base))
+        self.results_layout.addWidget(QLabel(f"<b>Uncaptured spend in this scope ({len(rows)} vendors)</b>"))
+        hint = QLabel("Double-click a row to filter the vendor picker above to it.")
+        hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        self.results_layout.addWidget(hint)
+
+        table = QTableWidget()
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(["Vendor", "Count", "Total"])
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        shown = rows[:_UNCAPTURED_LIMIT]
+        table.setRowCount(len(shown))
+        for row, r in enumerate(shown):
+            key_item = QTableWidgetItem(r.label)
+            key_item.setData(Qt.ItemDataRole.UserRole, r.key)
+            table.setItem(row, 0, key_item)
+            table.setItem(row, 1, QTableWidgetItem(str(r.transaction_count)))
+            amount_item = QTableWidgetItem(f"£{r.total:,.2f}")
+            amount_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            amount_item.setForeground(QColor(theme.WARNING if r.total < 0 else theme.SUCCESS))
+            table.setItem(row, 2, amount_item)
+        table.resizeColumnsToContents()
+        table.setMinimumHeight(200)
+        table.cellDoubleClicked.connect(
+            lambda r, _c, t=table: self._select_vendor(t.item(r, 0).data(Qt.ItemDataRole.UserRole))
+        )
+        self.results_layout.addWidget(table)
+        self.results_layout.addStretch()
 
     def _on_line_frequency_changed(self):
         new_freq = self.frequency_combo.currentData()
@@ -415,11 +509,11 @@ class BudgetBuilderScreen(QWidget):
             self.amount_spin.setValue(round(rescaled, 2))
         self._line_frequency = new_freq
 
-    # -- add as budget line -----------------------------------------------------
+    # -- staging -----------------------------------------------------------
 
-    def _add_budget_line(self):
+    def _stage_line(self):
         if self._current_aggregate is None or not self._current_aggregate.transactions:
-            QMessageBox.warning(self, "Nothing to add", "Adjust the filters above first.")
+            QMessageBox.warning(self, "Nothing to stage", "Adjust the filters above first.")
             return
         description = self.desc_edit.text().strip()
         if not description:
@@ -434,41 +528,81 @@ class BudgetBuilderScreen(QWidget):
             QMessageBox.warning(self, "Missing account", "Choose a target account.")
             return
 
-        line_frequency = self.frequency_combo.currentData()
-        item = BudgetItem(
+        vendor_keys = self.vendor_select.checked_ids() or []
+        vendor_labels = [v.label for v in self._vendors if v.key in vendor_keys]
+        staged = StagedLine(
             description=description,
             amount=abs(self.amount_spin.value()),
             flow_type=self.flow_combo.currentData(),
-            frequency=line_frequency,
-            effective_from=_to_pydate(self.effective_from_edit.date()),
-            category=get_or_create_category(self.session, category_name),
+            frequency=self.frequency_combo.currentData(),
             account_id=target_account_id,
+            category_name=category_name,
+            vendor_keys=vendor_keys,
+            vendor_label=" + ".join(vendor_labels),
+            effective_from=_to_pydate(self.effective_from_edit.date()),
+            window_start=self._current_aggregate.start_date,
+            window_end=self._current_aggregate.end_date,
         )
-        self.session.add(item)
+        self._staged_lines.append(staged)
+        self._render_staged_table()
+
+    def _remove_staged(self, index: int):
+        if 0 <= index < len(self._staged_lines):
+            del self._staged_lines[index]
+        self._render_staged_table()
+
+    def _render_staged_table(self):
+        self.staged_table.setRowCount(len(self._staged_lines))
+        for row, staged in enumerate(self._staged_lines):
+            self.staged_table.setItem(row, 0, QTableWidgetItem(staged.description))
+            self.staged_table.setItem(row, 1, QTableWidgetItem(staged.vendor_label or "Whole category"))
+            self.staged_table.setItem(row, 2, QTableWidgetItem(staged.category_name))
+            amount_item = QTableWidgetItem(f"£{staged.amount:,.2f}")
+            amount_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.staged_table.setItem(row, 3, amount_item)
+            self.staged_table.setItem(row, 4, QTableWidgetItem(staged.frequency.value))
+            self.staged_table.setItem(
+                row, 5, QTableWidgetItem(self._account_names.get(staged.account_id, "—"))
+            )
+            window_text = (
+                f"{staged.window_start:%d %b %y} – {staged.window_end:%d %b %y}"
+                if staged.window_start and staged.window_end
+                else "—"
+            )
+            self.staged_table.setItem(row, 6, QTableWidgetItem(window_text))
+            remove_btn = QPushButton("Remove")
+            remove_btn.clicked.connect(lambda _checked=False, i=row: self._remove_staged(i))
+            self.staged_table.setCellWidget(row, 7, remove_btn)
+        self.staged_table.resizeColumnsToContents()
+        self.save_staged_button.setEnabled(bool(self._staged_lines))
+        self.save_staged_button.setText(
+            f"Save All Staged Lines ({len(self._staged_lines)})"
+            if self._staged_lines
+            else "Save All Staged Lines"
+        )
+
+    def _save_staged_lines(self):
+        if not self._staged_lines:
+            return
+        for staged in self._staged_lines:
+            commit_staged_line(self.session, staged)
         self.session.commit()
-
-        self._added_item_ids.add(item.id)
-        self._refresh_budget_lines()
-
+        count = len(self._staged_lines)
+        self._staged_lines = []
+        self._render_staged_table()
+        self._refresh_existing_items()
+        QMessageBox.information(self, "Saved", f"Saved {count} budget line(s).")
         if self.on_change:
             self.on_change()
 
-    def _refresh_budget_lines(self):
-        items = self.session.query(BudgetItem).all()
-        items.sort(key=lambda i: (i.id not in self._added_item_ids, i.account.name, i.description))
-        self.all_lines_table.setRowCount(0)
-        for item in items:
-            row = self.all_lines_table.rowCount()
-            self.all_lines_table.insertRow(row)
-            is_new = item.id in self._added_item_ids
-            status_item = QTableWidgetItem("New" if is_new else "")
-            if is_new:
-                status_item.setForeground(QColor(theme.ACCENT))
-                font = status_item.font()
-                font.setBold(True)
-                status_item.setFont(font)
-            self.all_lines_table.setItem(row, 0, status_item)
-            self.all_lines_table.setItem(row, 1, QTableWidgetItem(item.description))
+    # -- existing budget items -----------------------------------------------
+
+    def _refresh_existing_items(self):
+        items = self.session.query(BudgetItem).order_by(BudgetItem.account_id, BudgetItem.description).all()
+        self.all_lines_table.setRowCount(len(items))
+        for row, item in enumerate(items):
+            self.all_lines_table.setItem(row, 0, QTableWidgetItem(item.description))
+            self.all_lines_table.setItem(row, 1, QTableWidgetItem(", ".join(item.vendor_list) or "—"))
             self.all_lines_table.setItem(
                 row, 2, QTableWidgetItem(item.category.name if item.category else "—")
             )

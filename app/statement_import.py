@@ -54,6 +54,30 @@ def classify_transactions(transactions: list[dict]) -> list[dict]:
     return [{**t, "category": classify(str(t.get("description", ""))) or UNCATEGORIZED} for t in transactions]
 
 
+def find_matching_budget_item(items: list[BudgetItem], description: str, as_of: dt.date) -> BudgetItem | None:
+    """Whichever of `items` (already fetched — one account's BudgetItems)
+    this description matches, per match_budget_item's rules. Factored out so
+    callers checking many transactions against the same account can fetch
+    that account's items once and reuse this, instead of match_budget_item's
+    one-query-per-call re-fetching the same rows over and over — see
+    app/budget_builder.py's uncaptured_transactions."""
+    norm = normalize_description(description)
+    if not norm:
+        return None
+    for item in items:
+        if not item.is_active_on(as_of):
+            continue
+        vendor_list = item.vendor_list
+        if vendor_list:
+            if norm in vendor_list:
+                return item
+            continue
+        item_norm = normalize_description(item.description)
+        if item_norm and (item_norm in norm or norm in item_norm):
+            return item
+    return None
+
+
 def match_budget_item(
     session: Session, account_id: int, description: str, as_of: dt.date
 ) -> BudgetItem | None:
@@ -74,21 +98,8 @@ def match_budget_item(
     only ever matches a transaction whose own merchant key is in that list,
     even if the two descriptions happen to overlap textually.
     """
-    norm = normalize_description(description)
-    if not norm:
-        return None
-    for item in session.query(BudgetItem).filter_by(account_id=account_id).all():
-        if not item.is_active_on(as_of):
-            continue
-        vendor_list = item.vendor_list
-        if vendor_list:
-            if norm in vendor_list:
-                return item
-            continue
-        item_norm = normalize_description(item.description)
-        if item_norm and (item_norm in norm or norm in item_norm):
-            return item
-    return None
+    items = session.query(BudgetItem).filter_by(account_id=account_id).all()
+    return find_matching_budget_item(items, description, as_of)
 
 
 def match_upcoming_expense_transaction(statement: Statement, expense: UpcomingExpense) -> Transaction | None:

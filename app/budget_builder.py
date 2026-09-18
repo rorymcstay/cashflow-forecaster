@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.models import OCCURRENCES_PER_YEAR, BudgetItem, FlowType, Frequency, Transaction
 from app.seed import get_or_create_category
-from app.statement_import import match_budget_item
+from app.statement_import import find_matching_budget_item
 from app.transactions import merchant_key
 
 DAYS_PER_YEAR = 365.25
@@ -113,18 +113,26 @@ def aggregate_spend(
 
 def uncaptured_transactions(session: Session, transactions: list[Transaction]) -> list[Transaction]:
     """Whichever of `transactions` has no covering BudgetItem: neither linked
-    at import time (`matched_budget_item`) nor matched live by
-    match_budget_item — which also picks up items created *after* the
-    transaction was imported, and respects vendor-scoped items (a
-    category-level item that only covers some vendors leaves the rest of
-    that category's transactions uncaptured). This is the complement of what
-    the builder has already turned into budget lines: the spend still
-    waiting on one."""
+    at import time (`matched_budget_item`) nor matched live — which also
+    picks up items created *after* the transaction was imported, and
+    respects vendor-scoped items (a category-level item that only covers
+    some vendors leaves the rest of that category's transactions
+    uncaptured). This is the complement of what the builder has already
+    turned into budget lines: the spend still waiting on one.
+
+    Fetches each distinct account's BudgetItems once and reuses them across
+    every transaction on that account, rather than match_budget_item's
+    one-query-per-transaction — the difference between a handful of queries
+    and thousands when called over a whole transaction pool."""
+    items_by_account: dict[int, list[BudgetItem]] = {}
     result = []
     for t in transactions:
         if t.matched_budget_item_id is not None:
             continue
-        if match_budget_item(session, t.statement.account_id, t.description, t.date) is not None:
+        account_id = t.statement.account_id
+        if account_id not in items_by_account:
+            items_by_account[account_id] = session.query(BudgetItem).filter_by(account_id=account_id).all()
+        if find_matching_budget_item(items_by_account[account_id], t.description, t.date) is not None:
             continue
         result.append(t)
     return result

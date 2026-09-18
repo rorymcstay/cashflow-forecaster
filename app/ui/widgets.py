@@ -122,6 +122,14 @@ class AccountMultiSelect(QPushButton):
     def checked_ids(self) -> list[int]:
         return [i for i in self._order if i in self._checked]
 
+    def set_checked_ids(self, ids: list[int]) -> None:
+        """Programmatically replace the checked set (e.g. "filter to just
+        this one item, picked elsewhere in the screen") and notify listeners
+        exactly as if the user had done it via the popup."""
+        self._checked = {i for i in ids if i in self._names}
+        self._update_label()
+        self.selectionChanged.emit()
+
     def _update_label(self) -> None:
         if self.label_mode == "exclude":
             if not self._checked:
