@@ -137,12 +137,53 @@ class VendorGroup(Base):
         self.vendors = ",".join(keys) if keys else None
 
 
+class BudgetStatus(enum.Enum):
+    ACTIVE = "Active"
+    ARCHIVED = "Archived"
+
+
+class Budget(Base):
+    """A named, switchable set of BudgetItem lines. Exactly one budget is
+    ever "active" at a time — tracked in the single-row GlobalOptions table
+    — and every forecast/report reads only the active budget's items, so
+    switching budgets swaps the household's whole recurring-payment plan in
+    one action. See app/budgets.py."""
+
+    __tablename__ = "budgets"
+    __table_args__ = (UniqueConstraint("name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    status: Mapped[BudgetStatus] = mapped_column(Enum(BudgetStatus), default=BudgetStatus.ACTIVE)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: dt.datetime.now(dt.UTC))
+    notes: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    budget_items: Mapped[list["BudgetItem"]] = relationship(
+        back_populates="budget", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return self.name
+
+
+class GlobalOptions(Base):
+    """Single-row (id always 1) table of app-wide settings — currently just
+    which Budget is active. A dedicated table (rather than e.g. a column on
+    some other singleton) so future global settings have an obvious home."""
+
+    __tablename__ = "global_options"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    active_budget_id: Mapped[int | None] = mapped_column(ForeignKey("budgets.id"), nullable=True)
+
+
 class BudgetItem(Base):
     """A committed, recurring payment (income or expense)."""
 
     __tablename__ = "budget_items"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    budget_id: Mapped[int] = mapped_column(ForeignKey("budgets.id"))
     description: Mapped[str] = mapped_column(String(120))
     amount: Mapped[float] = mapped_column(Float)
     flow_type: Mapped[FlowType] = mapped_column(Enum(FlowType), default=FlowType.EXPENSE)
@@ -167,6 +208,7 @@ class BudgetItem(Base):
     # amount leaves `account` and is projected as an inflow here.
     target_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
 
+    budget: Mapped["Budget"] = relationship(back_populates="budget_items")
     category: Mapped["Category"] = relationship()
     account: Mapped["Account"] = relationship(back_populates="budget_items", foreign_keys=[account_id])
     target_account: Mapped["Account | None"] = relationship(foreign_keys=[target_account_id])

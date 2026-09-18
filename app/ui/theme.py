@@ -89,6 +89,39 @@ QLabel {{
     background: transparent;
 }}
 
+/* Sidebar nav */
+#SidebarNav {{
+    background-color: {SURFACE};
+    border: none;
+    border-right: 1px solid {BORDER};
+    padding: 8px 0px;
+    outline: none;
+}}
+#SidebarNav::item {{
+    padding: 10px 18px;
+    color: {TEXT_MUTED};
+    font-weight: 600;
+    border-left: 3px solid transparent;
+}}
+#SidebarNav::item:selected {{
+    background-color: {SURFACE_ALT};
+    color: {TEXT};
+    border-left: 3px solid {ACCENT};
+}}
+#SidebarNav::item:hover:!selected {{
+    color: {TEXT};
+}}
+#SidebarToggle {{
+    background: transparent;
+    border: none;
+    font-size: 16px;
+    padding: 0px;
+}}
+#SidebarToggle:hover {{
+    background-color: {SURFACE_ALT};
+    border-radius: 6px;
+}}
+
 /* Tabs */
 QTabWidget::pane {{
     border: none;

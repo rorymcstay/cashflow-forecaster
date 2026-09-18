@@ -11,6 +11,7 @@ import itertools
 import plotly.graph_objects as go
 from nicegui import ui
 
+from app.budgets import get_active_budget
 from app.models import Account, BudgetItem, Category, FlowType, Frequency, Transaction
 from app.seed import get_or_create_category
 from app.statement_import import UNCATEGORIZED, generate_suggestions, match_budget_item
@@ -454,6 +455,7 @@ def transactions_page():
                         effective_from=dt.date.fromisoformat(from_input.value),
                         category=get_or_create_category(session, category_name),
                         account_id=account_select.value,
+                        budget=get_active_budget(session),
                     )
                     session.add(item)
                     session.commit()

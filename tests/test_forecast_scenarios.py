@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.budgets import get_active_budget
 from app.forecast import HypotheticalItem, OneOffEvent, combined_daily_forecast
 from app.models import Account, Base, BudgetItem, Category, FlowType, Frequency
 
@@ -37,6 +38,7 @@ def test_income_growth_rate_zero_matches_default_behavior(session, category):
             effective_from=dt.date(2026, 1, 1),
             category=category,
             account=account,
+            budget=get_active_budget(session),
         )
     )
     session.commit()
@@ -58,6 +60,7 @@ def test_income_growth_escalates_income_only(session, category):
     account = Account(name="Checking", current_balance=0.0, balance_as_of=today)
     session.add(account)
     session.flush()
+    budget = get_active_budget(session)
     session.add_all(
         [
             BudgetItem(
@@ -68,6 +71,7 @@ def test_income_growth_escalates_income_only(session, category):
                 effective_from=today,
                 category=category,
                 account=account,
+                budget=budget,
             ),
             BudgetItem(
                 description="Rent",
@@ -77,6 +81,7 @@ def test_income_growth_escalates_income_only(session, category):
                 effective_from=today,
                 category=category,
                 account=account,
+                budget=budget,
             ),
         ]
     )

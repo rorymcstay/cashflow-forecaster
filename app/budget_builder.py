@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
+from app.budgets import active_budget_items, get_active_budget
 from app.models import OCCURRENCES_PER_YEAR, BudgetItem, FlowType, Frequency, Transaction
 from app.seed import get_or_create_category
 from app.statement_import import find_matching_budget_item
@@ -131,7 +132,7 @@ def uncaptured_transactions(session: Session, transactions: list[Transaction]) -
             continue
         account_id = t.statement.account_id
         if account_id not in items_by_account:
-            items_by_account[account_id] = session.query(BudgetItem).filter_by(account_id=account_id).all()
+            items_by_account[account_id] = active_budget_items(session).filter_by(account_id=account_id).all()
         if find_matching_budget_item(items_by_account[account_id], t.description, t.date) is not None:
             continue
         result.append(t)
@@ -187,6 +188,10 @@ class StagedLine:
     vendor_keys: list[str] = field(default_factory=list)
     vendor_label: str = ""
     effective_from: dt.date = field(default_factory=dt.date.today)
+    # Populated for lines that came from app/budget_recommender.py — explains
+    # which rule proposed the line and why, shown alongside it in the
+    # staging table; empty for manually-built lines.
+    rationale: str = ""
     window_start: dt.date | None = None
     window_end: dt.date | None = None
 
@@ -202,6 +207,7 @@ def commit_staged_line(session: Session, staged: StagedLine) -> BudgetItem:
         effective_from=staged.effective_from,
         category=get_or_create_category(session, staged.category_name),
         account_id=staged.account_id,
+        budget=get_active_budget(session),
     )
     item.vendor_list = staged.vendor_keys
     session.add(item)

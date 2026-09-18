@@ -33,6 +33,8 @@ from app.budget_builder import (
     uncaptured_transactions,
     vendor_options,
 )
+from app.budget_recommender import recommend_budget
+from app.budgets import active_budget_items
 from app.models import OCCURRENCES_PER_YEAR, Account, BudgetItem, Category, FlowType, Frequency
 from app.transactions import query_transactions
 from app.ui import theme
@@ -144,6 +146,20 @@ class BudgetBuilderScreen(QWidget):
         range_row.addWidget(hint)
         range_row.addStretch()
         outer.addLayout(range_row)
+
+        recommend_row = QHBoxLayout()
+        recommend_btn = QPushButton("🔮 Recommend Budget")
+        recommend_btn.clicked.connect(self._recommend_budget)
+        recommend_row.addWidget(recommend_btn)
+        recommend_hint = QLabel(
+            "Proposes a full slate of staged lines from transaction history — recurring bills, "
+            "usage-based charges, and a category catch-all for the rest — for you to review/edit below. "
+            "Only the Source accounts filter above applies to it."
+        )
+        recommend_hint.setWordWrap(True)
+        recommend_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        recommend_row.addWidget(recommend_hint, stretch=1)
+        outer.addLayout(recommend_row)
 
         # -- results / staging split -------------------------------------------
 
@@ -554,7 +570,10 @@ class BudgetBuilderScreen(QWidget):
     def _render_staged_table(self):
         self.staged_table.setRowCount(len(self._staged_lines))
         for row, staged in enumerate(self._staged_lines):
-            self.staged_table.setItem(row, 0, QTableWidgetItem(staged.description))
+            desc_item = QTableWidgetItem(("🔮 " if staged.rationale else "") + staged.description)
+            if staged.rationale:
+                desc_item.setToolTip(staged.rationale)
+            self.staged_table.setItem(row, 0, desc_item)
             self.staged_table.setItem(row, 1, QTableWidgetItem(staged.vendor_label or "Whole category"))
             self.staged_table.setItem(row, 2, QTableWidgetItem(staged.category_name))
             amount_item = QTableWidgetItem(f"£{staged.amount:,.2f}")
@@ -581,6 +600,27 @@ class BudgetBuilderScreen(QWidget):
             else "Save All Staged Lines"
         )
 
+    def _recommend_budget(self):
+        if self._staged_lines:
+            reply = QMessageBox.question(
+                self,
+                "Replace staged lines?",
+                f"This will replace the {len(self._staged_lines)} line(s) already staged with fresh "
+                "recommendations. Continue?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        account_ids = self.source_account_select.checked_ids() or None
+        recommendations = recommend_budget(self.session, account_ids=account_ids)
+        if not recommendations:
+            QMessageBox.information(
+                self, "Nothing to recommend", "No recurring bills or material uncaptured spend found."
+            )
+            return
+        self._staged_lines = recommendations
+        self._render_staged_table()
+
     def _save_staged_lines(self):
         if not self._staged_lines:
             return
@@ -598,7 +638,9 @@ class BudgetBuilderScreen(QWidget):
     # -- existing budget items -----------------------------------------------
 
     def _refresh_existing_items(self):
-        items = self.session.query(BudgetItem).order_by(BudgetItem.account_id, BudgetItem.description).all()
+        items = (
+            active_budget_items(self.session).order_by(BudgetItem.account_id, BudgetItem.description).all()
+        )
         self.all_lines_table.setRowCount(len(items))
         for row, item in enumerate(items):
             self.all_lines_table.setItem(row, 0, QTableWidgetItem(item.description))

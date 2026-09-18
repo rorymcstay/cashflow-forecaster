@@ -33,6 +33,7 @@ def init_db() -> None:
     Base.metadata.create_all(engine)
     _add_missing_columns()
     _drop_removed_columns()
+    _migrate_budgets()
 
 
 _ADDED_COLUMNS = {
@@ -54,6 +55,11 @@ _ADDED_COLUMNS = {
     "budget_items": [
         ("target_account_id", "INTEGER REFERENCES accounts(id)"),
         ("vendors", "VARCHAR(2000)"),
+        # Nullable at the DB level purely so this ALTER works against
+        # existing rows — _migrate_budgets() backfills every row to the
+        # default budget immediately after, so it's never actually null in
+        # practice. The model's BudgetItem.budget_id stays non-Optional.
+        ("budget_id", "INTEGER REFERENCES budgets(id)"),
     ],
 }
 
@@ -84,6 +90,21 @@ def _drop_removed_columns() -> None:
                 if name in existing:
                     conn.exec_driver_sql(f"ALTER TABLE {table} DROP COLUMN {name}")
         conn.commit()
+
+
+def _migrate_budgets() -> None:
+    """Guarantee a default budget + active selection exist, and file any
+    pre-multi-budget BudgetItem rows (budget_id still null after the ALTER
+    above) under it."""
+    from app.budgets import backfill_unassigned_budget_items, ensure_default_budget
+
+    session = SessionLocal()
+    try:
+        budget = ensure_default_budget(session)
+        backfill_unassigned_budget_items(session, budget)
+        session.commit()
+    finally:
+        session.close()
 
 
 def get_session() -> Session:

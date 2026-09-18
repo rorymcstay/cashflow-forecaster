@@ -2,6 +2,7 @@ import datetime as dt
 
 from nicegui import ui
 
+from app.budgets import active_budget_items, get_active_budget
 from app.models import Account, BudgetItem, Category, FlowType, Frequency
 from app.seed import get_or_create_category
 from app.web.layout import TEXT_MUTED, get_page_session, page_shell
@@ -21,7 +22,7 @@ def budget_items_page():
 
         def render_list():
             list_container.clear()
-            items = session.query(BudgetItem).order_by(BudgetItem.description).all()
+            items = active_budget_items(session).order_by(BudgetItem.description).all()
             with list_container:
                 header = (
                     ui.row()
@@ -150,7 +151,10 @@ def budget_items_page():
                     obj = item
                     if obj is None:
                         obj = BudgetItem(
-                            description=description, category=category, account_id=account_select.value
+                            description=description,
+                            category=category,
+                            account_id=account_select.value,
+                            budget=get_active_budget(session),
                         )
                         session.add(obj)
 

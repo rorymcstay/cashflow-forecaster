@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from sqlalchemy.orm import Session
 
 from app.budget_builder import vendor_options
+from app.budgets import active_budget_items, get_active_budget
 from app.forecast import account_run_rate
 from app.models import (
     Account,
@@ -243,7 +244,7 @@ class AccountDialog(QDialog):
         """("budget"|"upcoming", obj) for every transfer where this account is
         either the source or the target."""
         budget_items = (
-            self.session.query(BudgetItem)
+            active_budget_items(self.session)
             .filter(
                 BudgetItem.flow_type == FlowType.TRANSFER,
                 (BudgetItem.account_id == self.obj.id) | (BudgetItem.target_account_id == self.obj.id),
@@ -571,6 +572,7 @@ class BudgetItemDialog(QDialog):
                 category=category,
                 account_id=account_id,
                 target_account_id=target_account_id,
+                budget=get_active_budget(self.session),
             )
             self.session.add(self.obj)
         else:

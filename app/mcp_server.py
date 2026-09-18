@@ -5,6 +5,18 @@ from mcp.server.mcpserver import MCPServer
 
 from app import investment_sim, market_data
 from app.analytics import expense_vs_forecast as _expense_vs_forecast
+from app.budget_recommender import recommend_budget as _recommend_budget_core
+from app.budgets import (
+    active_budget_items,
+    archive_budget as _archive_budget,
+    create_budget as _create_budget,
+    delete_budget as _delete_budget,
+    get_active_budget,
+    list_budgets as _list_budgets,
+    rename_budget as _rename_budget,
+    restore_budget as _restore_budget,
+    set_active_budget as _set_active_budget,
+)
 from app.db import get_session, init_db
 from app.forecast import (
     HypotheticalItem,
@@ -15,7 +27,9 @@ from app.forecast import (
 )
 from app.models import (
     Account,
+    Budget,
     BudgetItem,
+    BudgetStatus,
     BudgetSuggestion,
     Category,
     FlowType,
@@ -182,6 +196,42 @@ def _resolve_vendor_group(session, vendor_group_id: int) -> VendorGroup:
     if group is None:
         raise ValueError(f"No vendor group with id {vendor_group_id}.")
     return group
+
+
+def _budget_to_dict(session, b) -> dict:
+    return {
+        "id": b.id,
+        "name": b.name,
+        "status": b.status.value,
+        "is_active": b.id == get_active_budget(session).id,
+        "budget_item_count": len(b.budget_items),
+        "created_at": b.created_at.isoformat(),
+        "notes": b.notes,
+    }
+
+
+def _resolve_budget(session, budget_id: int):
+    budget = session.get(Budget, budget_id)
+    if budget is None:
+        raise ValueError(f"No budget with id {budget_id}.")
+    return budget
+
+
+def _staged_line_to_dict(line) -> dict:
+    return {
+        "description": line.description,
+        "amount": line.amount,
+        "flow_type": line.flow_type.value,
+        "frequency": line.frequency.value,
+        "account_id": line.account_id,
+        "category_name": line.category_name,
+        "vendor_keys": line.vendor_keys,
+        "vendor_label": line.vendor_label,
+        "effective_from": line.effective_from.isoformat(),
+        "rationale": line.rationale,
+        "window_start": line.window_start.isoformat() if line.window_start else None,
+        "window_end": line.window_end.isoformat() if line.window_end else None,
+    }
 
 
 def _resolve_suggestion_status(value: str) -> SuggestionStatus:
@@ -1043,6 +1093,109 @@ def delete_vendor_group(vendor_group_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# budgets
+# ---------------------------------------------------------------------------
+
+
+@server.tool()
+def list_budgets(include_archived: bool = True) -> list[dict]:
+    """List budgets: named, switchable sets of BudgetItem lines. Exactly one
+    is active at a time (is_active in the result) — every other tool that
+    reads/writes committed budget items (list_budget_items,
+    get_cashflow_forecast, get_budget_summary, ...) only sees the active
+    one's."""
+    session = get_session()
+    try:
+        return [_budget_to_dict(session, b) for b in _list_budgets(session, include_archived)]
+    finally:
+        session.close()
+
+
+@server.tool()
+def create_budget(name: str, clone_from_budget_id: int | None = None) -> dict:
+    """Create a new budget. If clone_from_budget_id is given, copies every
+    one of that budget's items into the new one ("Save As" — branch an
+    existing plan under a new name before changing it)."""
+    session = get_session()
+    try:
+        clone_from = _resolve_budget(session, clone_from_budget_id) if clone_from_budget_id else None
+        budget = _create_budget(session, name, clone_from=clone_from)
+        session.commit()
+        return _budget_to_dict(session, budget)
+    finally:
+        session.close()
+
+
+@server.tool()
+def activate_budget(budget_id: int) -> dict:
+    """Make this budget the active one — every screen/forecast/report
+    immediately starts reading its budget items instead of the previous
+    active budget's."""
+    session = get_session()
+    try:
+        budget = _set_active_budget(session, budget_id)
+        session.commit()
+        return _budget_to_dict(session, budget)
+    finally:
+        session.close()
+
+
+@server.tool()
+def rename_budget(budget_id: int, name: str) -> dict:
+    session = get_session()
+    try:
+        budget = _resolve_budget(session, budget_id)
+        _rename_budget(budget, name)
+        session.commit()
+        return _budget_to_dict(session, budget)
+    finally:
+        session.close()
+
+
+@server.tool()
+def archive_budget(budget_id: int) -> dict:
+    """Hide a budget from active use without deleting its history. Fails if
+    this is currently the active budget — activate a different one first."""
+    session = get_session()
+    try:
+        budget = _resolve_budget(session, budget_id)
+        _archive_budget(session, budget)
+        session.commit()
+        return _budget_to_dict(session, budget)
+    finally:
+        session.close()
+
+
+@server.tool()
+def restore_budget(budget_id: int) -> dict:
+    """Un-archive a budget, making it selectable/activatable again."""
+    session = get_session()
+    try:
+        budget = _resolve_budget(session, budget_id)
+        _restore_budget(budget)
+        session.commit()
+        return _budget_to_dict(session, budget)
+    finally:
+        session.close()
+
+
+@server.tool()
+def delete_budget(budget_id: int) -> dict:
+    """Permanently delete a budget and every one of its budget items. Fails
+    if this is currently the active budget — activate a different one
+    first."""
+    session = get_session()
+    try:
+        budget = _resolve_budget(session, budget_id)
+        name = budget.name
+        _delete_budget(session, budget)
+        session.commit()
+        return {"deleted": True, "id": budget_id, "name": name}
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
 # budget items
 # ---------------------------------------------------------------------------
 
@@ -1056,7 +1209,7 @@ def list_budget_items(active_only: bool = False, as_of: str | None = None) -> li
     """
     session = get_session()
     try:
-        items = session.query(BudgetItem).order_by(BudgetItem.effective_from).all()
+        items = active_budget_items(session).order_by(BudgetItem.effective_from).all()
         if active_only:
             ref = _parse_date(as_of) or dt.date.today()
             items = [i for i in items if i.is_active_on(ref)]
@@ -1110,6 +1263,7 @@ def create_budget_item(
             category=get_or_create_category(session, category),
             account=acc,
             target_account=_resolve_account(session, target_account) if target_account else None,
+            budget=get_active_budget(session),
         )
         session.add(item)
         session.commit()
@@ -1184,6 +1338,29 @@ def delete_budget_item(item_id: int) -> dict:
         session.delete(item)
         session.commit()
         return {"deleted": desc}
+    finally:
+        session.close()
+
+
+@server.tool()
+def recommend_budget_items(account: str | None = None) -> list[dict]:
+    """Propose a full slate of draft budget lines from transaction history —
+    not yet saved. A small rule tree per account: recurring vendors with a
+    tight amount spread become fixed "recurring_bill" lines (their own
+    guessed frequency); usage-based vendors with a looser spread become
+    "recurring_variable" lines at their average amount; whatever's left,
+    grouped by category, becomes a "category_catchall" line sized to the
+    3-month trailing moving average of that category's otherwise-uncaptured
+    monthly spend (only proposed if it clears a small materiality
+    threshold). Each result's `rationale` explains which rule fired and why.
+    Already-budgeted spend (in the active budget) is excluded throughout.
+    Pass the returned fields straight to create_budget_item to accept one.
+    """
+    session = get_session()
+    try:
+        account_ids = [_resolve_account(session, account).id] if account else None
+        lines = _recommend_budget_core(session, account_ids=account_ids)
+        return [_staged_line_to_dict(line) for line in lines]
     finally:
         session.close()
 

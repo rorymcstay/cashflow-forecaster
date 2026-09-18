@@ -14,6 +14,7 @@ from app.web.pages import (  # noqa: F401
     budget_builder,
     budget_items,
     budget_view,
+    budgets,
     cashflow,
     dashboard,
     insights,

@@ -4,14 +4,18 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMainWindow,
-    QTabWidget,
+    QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from app.budgets import get_active_budget, list_budgets, set_active_budget
 from app.db import get_session, init_db
 from app.seed import seed_defaults
 from app.ui import theme
@@ -19,6 +23,7 @@ from app.ui.accounts_screen import AccountsScreen
 from app.ui.budget_builder_screen import BudgetBuilderScreen
 from app.ui.budget_items_screen import BudgetItemsScreen
 from app.ui.budget_view_screen import BudgetViewScreen
+from app.ui.budgets_screen import BudgetsScreen
 from app.ui.cashflow_screen import CashflowForecastScreen
 from app.ui.dashboard_screen import DashboardScreen
 from app.ui.insights_screen import InsightsScreen
@@ -29,34 +34,7 @@ from app.ui.transactions_screen import TransactionsScreen
 from app.ui.upcoming_expenses_screen import UpcomingExpensesScreen
 from app.ui.vendor_groups_screen import VendorGroupsScreen
 
-
-def _build_header_bar() -> QWidget:
-    bar = QWidget()
-    bar.setObjectName("HeaderBar")
-    layout = QHBoxLayout(bar)
-    layout.setContentsMargins(20, 12, 20, 12)
-    layout.setSpacing(10)
-
-    logo = QLabel()
-    logo.setPixmap(
-        QPixmap(theme.ICON_PATH).scaled(
-            28, 28, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-        )
-    )
-    layout.addWidget(logo)
-
-    text_col = QVBoxLayout()
-    text_col.setSpacing(0)
-    title = QLabel("Household Budgeting")
-    title.setObjectName("HeaderTitle")
-    subtitle = QLabel("Accounts, recurring bills, and cash flow — all in one place")
-    subtitle.setObjectName("HeaderSubtitle")
-    text_col.addWidget(title)
-    text_col.addWidget(subtitle)
-    layout.addLayout(text_col)
-
-    layout.addStretch()
-    return bar
+SIDEBAR_WIDTH = 200
 
 
 class MainWindow(QMainWindow):
@@ -67,16 +45,13 @@ class MainWindow(QMainWindow):
         self.resize(1150, 720)
 
         self.session = get_session()
+        self._sidebar_visible = True
 
         central = QWidget()
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
-        central_layout.addWidget(_build_header_bar())
-
-        self.tabs = QTabWidget()
-        central_layout.addWidget(self.tabs)
-        self.setCentralWidget(central)
+        central_layout.addWidget(self._build_header_bar())
 
         self.dashboard_screen = DashboardScreen(self.session)
         self.accounts_screen = AccountsScreen(self.session, on_change=self.on_data_changed)
@@ -91,22 +66,114 @@ class MainWindow(QMainWindow):
         self.investment_sim_screen = InvestmentSimScreen(self.session)
         self.vendor_groups_screen = VendorGroupsScreen(self.session, on_change=self.on_data_changed)
         self.insights_screen = InsightsScreen(self.session)
+        self.budgets_screen = BudgetsScreen(self.session, on_change=self._on_budgets_changed)
 
-        self.tabs.addTab(self.dashboard_screen, "Dashboard")
-        self.tabs.addTab(self.accounts_screen, "Accounts")
-        self.tabs.addTab(self.cashflow_screen, "Cash Flow Forecast")
-        self.tabs.addTab(self.insights_screen, "Insights")
-        self.tabs.addTab(self.scenario_screen, "Scenarios")
-        self.tabs.addTab(self.budget_items_screen, "Budget Items")
-        self.tabs.addTab(self.budget_builder_screen, "Budget Builder")
-        self.tabs.addTab(self.vendor_groups_screen, "Vendor Groups")
-        self.tabs.addTab(self.upcoming_screen, "Upcoming Expenses")
-        self.tabs.addTab(self.statements_screen, "Statements")
-        self.tabs.addTab(self.transactions_screen, "Transactions")
-        self.tabs.addTab(self.budget_view_screen, "Budget")
-        self.tabs.addTab(self.investment_sim_screen, "Investment Simulation")
+        self._screens = [
+            (self.dashboard_screen, "Dashboard"),
+            (self.accounts_screen, "Accounts"),
+            (self.cashflow_screen, "Cash Flow Forecast"),
+            (self.insights_screen, "Insights"),
+            (self.scenario_screen, "Scenarios"),
+            (self.budgets_screen, "Budgets"),
+            (self.budget_items_screen, "Budget Items"),
+            (self.budget_builder_screen, "Budget Builder"),
+            (self.vendor_groups_screen, "Vendor Groups"),
+            (self.upcoming_screen, "Upcoming Expenses"),
+            (self.statements_screen, "Statements"),
+            (self.transactions_screen, "Transactions"),
+            (self.budget_view_screen, "Budget"),
+            (self.investment_sim_screen, "Investment Simulation"),
+        ]
 
-        self.tabs.currentChanged.connect(self.on_tab_changed)
+        self.nav_list = QListWidget()
+        self.nav_list.setObjectName("SidebarNav")
+        self.nav_list.setFixedWidth(SIDEBAR_WIDTH)
+
+        self.stack = QStackedWidget()
+        for screen, title in self._screens:
+            self.nav_list.addItem(title)
+            self.stack.addWidget(screen)
+        self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav_list.setCurrentRow(0)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(self.nav_list)
+        body.addWidget(self.stack, stretch=1)
+        central_layout.addLayout(body)
+
+        self.setCentralWidget(central)
+
+        self.stack.currentChanged.connect(self.on_screen_changed)
+        self._reload_budget_select()
+
+    def _build_header_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("HeaderBar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(10)
+
+        self.sidebar_toggle_btn = QPushButton("☰")
+        self.sidebar_toggle_btn.setObjectName("SidebarToggle")
+        self.sidebar_toggle_btn.setFixedSize(32, 32)
+        self.sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
+        layout.addWidget(self.sidebar_toggle_btn)
+
+        logo = QLabel()
+        logo.setPixmap(
+            QPixmap(theme.ICON_PATH).scaled(
+                28, 28, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
+        )
+        layout.addWidget(logo)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(0)
+        title = QLabel("Household Budgeting")
+        title.setObjectName("HeaderTitle")
+        subtitle = QLabel("Accounts, recurring bills, and cash flow — all in one place")
+        subtitle.setObjectName("HeaderSubtitle")
+        text_col.addWidget(title)
+        text_col.addWidget(subtitle)
+        layout.addLayout(text_col)
+
+        layout.addStretch()
+
+        layout.addWidget(QLabel("Budget:"))
+        self.budget_select = QComboBox()
+        self.budget_select.setMinimumWidth(160)
+        self.budget_select.currentIndexChanged.connect(self._on_budget_select_changed)
+        layout.addWidget(self.budget_select)
+
+        return bar
+
+    def _toggle_sidebar(self):
+        self._sidebar_visible = not self._sidebar_visible
+        self.nav_list.setVisible(self._sidebar_visible)
+
+    def _reload_budget_select(self):
+        active = get_active_budget(self.session)
+        self.budget_select.blockSignals(True)
+        self.budget_select.clear()
+        for budget in list_budgets(self.session, include_archived=False):
+            self.budget_select.addItem(budget.name, budget.id)
+        idx = self.budget_select.findData(active.id)
+        if idx >= 0:
+            self.budget_select.setCurrentIndex(idx)
+        self.budget_select.blockSignals(False)
+
+    def _on_budget_select_changed(self, _index: int):
+        budget_id = self.budget_select.currentData()
+        if budget_id is None or budget_id == get_active_budget(self.session).id:
+            return
+        set_active_budget(self.session, budget_id)
+        self.session.commit()
+        self.on_data_changed()
+
+    def _on_budgets_changed(self):
+        self.on_data_changed()
 
     def on_data_changed(self):
         self.dashboard_screen.reload_accounts()
@@ -124,9 +191,11 @@ class MainWindow(QMainWindow):
         self.scenario_screen.reload_accounts()
         self.investment_sim_screen.reload_accounts()
         self.insights_screen.reload()
+        self._reload_budget_select()
+        self.budgets_screen.refresh()
 
-    def on_tab_changed(self, index: int):
-        widget = self.tabs.widget(index)
+    def on_screen_changed(self, index: int):
+        widget = self.stack.widget(index)
         if widget is self.dashboard_screen:
             self.dashboard_screen.reload_accounts()
             self.dashboard_screen.refresh()
@@ -151,6 +220,8 @@ class MainWindow(QMainWindow):
             self.investment_sim_screen.reload_accounts()
         elif widget is self.insights_screen:
             self.insights_screen.reload()
+        elif widget is self.budgets_screen:
+            self.budgets_screen.refresh()
 
     def closeEvent(self, event):
         self.session.close()

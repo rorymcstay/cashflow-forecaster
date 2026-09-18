@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QDateEdit,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -23,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.analytics import ExpenseSeries, GRANULARITIES, expense_vs_forecast
 from app.models import Account, Category
 from app.ui import theme
-from app.ui.widgets import AccountMultiSelect
+from app.ui.widgets import AccountMultiSelect, CollapsibleSection
 from app.vendor_groups import list_vendor_groups
 
 GROUP_BY_OPTIONS = ["Category", "Vendor Group"]
@@ -73,77 +72,79 @@ class InsightsScreen(QWidget):
         description.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(description)
 
-        controls = QHBoxLayout()
-        controls.addWidget(QLabel("Group by:"))
+        self.filters_section = CollapsibleSection("Filters", expanded=True)
+        filters_layout = self.filters_section.content_layout
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Group by:"))
         self.group_by_combo = QComboBox()
         for g in GROUP_BY_OPTIONS:
             self.group_by_combo.addItem(g)
         self.group_by_combo.currentIndexChanged.connect(self._on_group_by_changed)
-        controls.addWidget(self.group_by_combo)
+        row1.addWidget(self.group_by_combo)
 
-        controls.addWidget(QLabel("Values:"))
+        row1.addWidget(QLabel("Values:"))
         self.value_select = AccountMultiSelect(noun="category", noun_plural="categories")
+        self.value_select.setToolTip("Leave nothing selected to show the combined total instead.")
         self.value_select.selectionChanged.connect(self.refresh)
-        controls.addWidget(self.value_select)
-        hint = QLabel("(none selected = combined total)")
-        hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
-        controls.addWidget(hint)
+        row1.addWidget(self.value_select)
 
-        controls.addWidget(QLabel("Accounts:"))
+        row1.addWidget(QLabel("Accounts:"))
         self.account_select = AccountMultiSelect()
         self.account_select.selectionChanged.connect(self.refresh)
-        controls.addWidget(self.account_select)
-        controls.addStretch()
-        layout.addLayout(controls)
+        row1.addWidget(self.account_select)
+        row1.addStretch()
+        filters_layout.addLayout(row1)
 
-        controls2 = QHBoxLayout()
-        controls2.addWidget(QLabel("Granularity:"))
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Granularity:"))
         self.granularity_combo = QComboBox()
         for g in GRANULARITIES:
             self.granularity_combo.addItem(g)
         self.granularity_combo.setCurrentText("Monthly")
         self.granularity_combo.currentIndexChanged.connect(self.refresh)
-        controls2.addWidget(self.granularity_combo)
+        row2.addWidget(self.granularity_combo)
 
-        controls2.addWidget(QLabel("Moving average window:"))
+        row2.addWidget(QLabel("MA window:"))
         self.ma_spin = QSpinBox()
         self.ma_spin.setRange(1, 24)
         self.ma_spin.setValue(3)
         self.ma_spin.valueChanged.connect(self.refresh)
-        controls2.addWidget(self.ma_spin)
+        row2.addWidget(self.ma_spin)
 
-        self.show_actual_check = QCheckBox("Show Actual")
+        self.show_actual_check = QCheckBox("Actual")
         self.show_actual_check.setChecked(True)
         self.show_actual_check.toggled.connect(self.refresh)
-        controls2.addWidget(self.show_actual_check)
+        row2.addWidget(self.show_actual_check)
 
-        self.show_ma_check = QCheckBox("Show Moving Average")
+        self.show_ma_check = QCheckBox("Moving Average")
         self.show_ma_check.setChecked(True)
         self.show_ma_check.toggled.connect(self.refresh)
-        controls2.addWidget(self.show_ma_check)
+        row2.addWidget(self.show_ma_check)
 
-        self.show_forecast_check = QCheckBox("Show Forecast")
+        self.show_forecast_check = QCheckBox("Forecast")
         self.show_forecast_check.setChecked(True)
         self.show_forecast_check.toggled.connect(self.refresh)
-        controls2.addWidget(self.show_forecast_check)
+        row2.addWidget(self.show_forecast_check)
+        row2.addStretch()
+        filters_layout.addLayout(row2)
 
-        controls2.addWidget(QLabel("From:"))
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("From:"))
         self.from_edit = QDateEdit(QDate.currentDate().addYears(-1))
         self.from_edit.setCalendarPopup(True)
         self.from_edit.dateChanged.connect(self.refresh)
-        controls2.addWidget(self.from_edit)
+        row3.addWidget(self.from_edit)
 
-        controls2.addWidget(QLabel("To:"))
+        row3.addWidget(QLabel("To:"))
         self.to_edit = QDateEdit(QDate.currentDate())
         self.to_edit.setCalendarPopup(True)
         self.to_edit.dateChanged.connect(self.refresh)
-        controls2.addWidget(self.to_edit)
+        row3.addWidget(self.to_edit)
+        row3.addStretch()
+        filters_layout.addLayout(row3)
 
-        controls2.addStretch()
-        refresh_btn = QPushButton("Refresh")
-        refresh_btn.clicked.connect(self.refresh)
-        controls2.addWidget(refresh_btn)
-        layout.addLayout(controls2)
+        layout.addWidget(self.filters_section)
 
         self.summary_label = QLabel()
         self.summary_label.setWordWrap(True)

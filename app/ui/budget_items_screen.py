@@ -2,6 +2,7 @@ import datetime as dt
 
 from sqlalchemy.orm import Session
 
+from app.budgets import active_budget_items
 from app.models import BudgetItem
 from app.ui.crud_screen import CrudScreen
 from app.ui.dialogs import BudgetItemDialog
@@ -25,7 +26,7 @@ COLUMNS = [
 
 
 def query_budget_items(session: Session) -> list[BudgetItem]:
-    return session.query(BudgetItem).order_by(BudgetItem.effective_from).all()
+    return active_budget_items(session).order_by(BudgetItem.effective_from).all()
 
 
 class BudgetItemsScreen(CrudScreen):

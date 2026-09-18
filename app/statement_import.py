@@ -14,6 +14,7 @@ from collections import defaultdict
 
 from sqlalchemy.orm import Session
 
+from app.budgets import active_budget_items, get_active_budget
 from app.classify import classify
 from app.forecast import generate_occurrences
 from app.models import (
@@ -98,7 +99,7 @@ def match_budget_item(
     only ever matches a transaction whose own merchant key is in that list,
     even if the two descriptions happen to overlap textually.
     """
-    items = session.query(BudgetItem).filter_by(account_id=account_id).all()
+    items = active_budget_items(session).filter_by(account_id=account_id).all()
     return find_matching_budget_item(items, description, as_of)
 
 
@@ -340,7 +341,7 @@ def budget_vs_actual_report(session: Session, statement: Statement) -> dict:
     variance means underearning relative to budget.
     """
     account = statement.account
-    items = session.query(BudgetItem).filter_by(account_id=account.id).all()
+    items = active_budget_items(session).filter_by(account_id=account.id).all()
     items_by_id = {i.id: i for i in items}
 
     expected_by_item: dict[int, float] = {}
@@ -536,6 +537,7 @@ def accept_suggestion(session: Session, suggestion: BudgetSuggestion) -> BudgetI
             effective_from=dt.date.today(),
             category=suggestion.category,
             account=suggestion.account,
+            budget=get_active_budget(session),
         )
         session.add(item)
         suggestion.budget_item = item

@@ -10,7 +10,9 @@ from app.budget_builder import (
     uncaptured_transactions,
     vendor_options,
 )
-from app.models import OCCURRENCES_PER_YEAR, Account, BudgetItem, Category, FlowType, Frequency
+from app.budget_recommender import recommend_budget
+from app.budgets import active_budget_items
+from app.models import OCCURRENCES_PER_YEAR, Account, Category, FlowType, Frequency
 from app.transactions import query_transactions
 from app.web.layout import SUCCESS, TEXT_MUTED, WARNING, get_page_session, page_shell
 
@@ -79,6 +81,14 @@ def budget_builder_page():
             ui.label("Leave blank to use the full history of whatever matches above.").style(
                 f"color: {TEXT_MUTED}; font-size: 12px;"
             )
+
+        with ui.row().classes("items-center gap-2"):
+            ui.button("🔮 Recommend Budget", on_click=lambda: recommend_clicked())
+            ui.label(
+                "Proposes a full slate of staged lines from transaction history — recurring bills, "
+                "usage-based charges, and a category catch-all for the rest. Only the Source accounts "
+                "filter above applies to it."
+            ).style(f"color: {TEXT_MUTED}; font-size: 12px;")
 
         with ui.row().classes("w-full gap-4 items-start flex-col md:flex-row"):
             result_container = ui.column().classes("w-full md:flex-1 gap-2")
@@ -318,7 +328,7 @@ def budget_builder_page():
             line_frequency_state["value"] = line_frequency_select.value
 
         def refresh_budget_lines():
-            items = session.query(BudgetItem).all()
+            items = active_budget_items(session).all()
             all_lines_table.rows = [
                 {
                     "id": item.id,
@@ -350,7 +360,9 @@ def budget_builder_page():
                         .style(f"border: 1px solid {TEXT_MUTED}; border-radius: 6px; padding: 4px 8px;")
                     ):
                         with ui.column().classes("gap-0").style("flex: 1;"):
-                            ui.label(staged.description).style("font-weight: 600;")
+                            ui.label(("🔮 " if staged.rationale else "") + staged.description).style(
+                                "font-weight: 600;"
+                            )
                             ui.label(
                                 f"{staged.vendor_label or 'Whole category'} · {staged.category_name} · "
                                 f"{_money(staged.amount)} {staged.frequency.value} · "
@@ -362,6 +374,10 @@ def budget_builder_page():
                                 else "—"
                             )
                             ui.label(f"Window: {window_text}").style(f"color: {TEXT_MUTED}; font-size: 11px;")
+                            if staged.rationale:
+                                ui.label(staged.rationale).style(
+                                    f"color: {TEXT_MUTED}; font-size: 11px; font-style: italic;"
+                                )
                         ui.button(icon="delete", on_click=lambda i=i: remove_staged(i)).props(
                             "flat dense color=negative"
                         )
@@ -419,6 +435,35 @@ def budget_builder_page():
             render_staged()
             refresh_budget_lines()
             ui.notify(f"Saved {count} budget line(s).", type="positive")
+
+        def do_recommend():
+            recommendations = recommend_budget(session, account_ids=source_account_select.value or None)
+            if not recommendations:
+                ui.notify("No recurring bills or material uncaptured spend found.", type="warning")
+                return
+            staged_lines.clear()
+            staged_lines.extend(recommendations)
+            render_staged()
+            ui.notify(f"Recommended {len(recommendations)} budget line(s) — review before saving.")
+
+        def recommend_clicked():
+            if staged_lines:
+                with ui.dialog() as confirm_dialog, ui.card():
+                    ui.label(
+                        f"This will replace the {len(staged_lines)} line(s) already staged with fresh "
+                        "recommendations. Continue?"
+                    )
+                    with ui.row().classes("justify-end w-full gap-2 mt-2"):
+                        ui.button("Cancel", on_click=confirm_dialog.close).props("flat")
+
+                        def confirm():
+                            confirm_dialog.close()
+                            do_recommend()
+
+                        ui.button("Replace", on_click=confirm)
+                confirm_dialog.open()
+            else:
+                do_recommend()
 
         vendor_select.on_value_change(lambda e: recompute())
         category_select.on_value_change(lambda e: recompute())

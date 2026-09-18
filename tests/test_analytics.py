@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.analytics import expense_vs_forecast
+from app.budgets import get_active_budget
 from app.models import (
     Account,
     Base,
@@ -78,6 +79,7 @@ def test_forecast_uses_matching_category_budget_item_occurrences(session):
             effective_from=dt.date(2026, 1, 1),
             category=groceries,
             account=account,
+            budget=get_active_budget(session),
         )
     )
     session.commit()
@@ -106,6 +108,7 @@ def test_vendor_group_filter_only_matches_vendor_scoped_items_and_transactions(s
     session.add(group)
     session.flush()
 
+    budget = get_active_budget(session)
     scoped_item = BudgetItem(
         description="Tesco",
         amount=50.0,
@@ -114,6 +117,7 @@ def test_vendor_group_filter_only_matches_vendor_scoped_items_and_transactions(s
         effective_from=dt.date(2026, 1, 1),
         category=groceries,
         account=account,
+        budget=budget,
     )
     scoped_item.vendor_list = ["TESCO STORES"]
     unscoped_item = BudgetItem(
@@ -124,6 +128,7 @@ def test_vendor_group_filter_only_matches_vendor_scoped_items_and_transactions(s
         effective_from=dt.date(2026, 1, 1),
         category=groceries,
         account=account,
+        budget=budget,
     )
     session.add_all([scoped_item, unscoped_item])
     session.commit()

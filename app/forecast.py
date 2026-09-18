@@ -8,6 +8,7 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy.orm import Session
 
 from app import market_data
+from app.budgets import active_budget_items
 from app.models import Account, BudgetItem, FlowType, Frequency, Statement, Transaction, UpcomingExpense
 
 PERIOD_DAYS = {
@@ -105,7 +106,7 @@ def monthly_budget_summary(
     `as_of`, excluding any billed to an account in `exclude_account_ids`."""
     as_of = as_of or dt.date.today()
     excluded = set(exclude_account_ids or ())
-    items = session.query(BudgetItem).all()
+    items = active_budget_items(session).all()
     rows = [
         {
             "flow_type": item.flow_type.value,
@@ -135,7 +136,7 @@ def monthly_savings_amount(
     as_of = as_of or dt.date.today()
     excluded = set(exclude_account_ids or ())
     total = 0.0
-    for item in session.query(BudgetItem).filter_by(flow_type=FlowType.TRANSFER).all():
+    for item in active_budget_items(session).filter_by(flow_type=FlowType.TRANSFER).all():
         if not item.is_active_on(as_of) or item.account_id in excluded:
             continue
         target = item.target_account
@@ -305,7 +306,7 @@ def _collect_own_charge_events(
     """
     events: list[tuple[dt.date, float, str]] = []
     items: list[BudgetItem | HypotheticalItem] = list(
-        session.query(BudgetItem).filter_by(account_id=account.id).all()
+        active_budget_items(session).filter_by(account_id=account.id).all()
     )
     items += [x for x in (extra_items or []) if x.account_id == account.id]
     for item in items:
@@ -436,7 +437,7 @@ def _collect_account_events(
         session, account, compute_start, compute_end, income_growth_rate, extra_items, one_off_events
     )
 
-    for item in session.query(BudgetItem).filter_by(target_account_id=account.id).all():
+    for item in active_budget_items(session).filter_by(target_account_id=account.id).all():
         description = f"{item.description} (from {item.account.name})"
         for occ in generate_occurrences(
             item.effective_from, item.effective_until, item.frequency, compute_start, compute_end

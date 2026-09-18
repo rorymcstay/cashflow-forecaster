@@ -36,26 +36,28 @@ def insights_page():
         today = dt.date.today()
         value_label_by_id: dict[int, str] = {}
 
-        with ui.row().classes("items-center gap-2 flex-wrap"):
-            group_by_select = ui.select(GROUP_BY_OPTIONS, label="Group by", value="Category")
-            value_select = ui.select(
-                {}, multiple=True, label="Values (none = combined total)", value=[]
-            ).classes("min-w-[260px]")
-            granularity_select = ui.select(GRANULARITIES, label="Granularity", value="Monthly")
-            ma_input = ui.number("Moving avg window", value=3, min=1, max=24, format="%.0f").classes("w-32")
-            account_select = ui.select(
-                account_options, multiple=True, label="Accounts", value=list(account_options.keys())
-            ).classes("min-w-[220px]")
+        with ui.expansion("Filters", value=True, icon="tune").classes("w-full section-card"):
+            with ui.row().classes("items-center gap-2 flex-wrap"):
+                group_by_select = ui.select(GROUP_BY_OPTIONS, label="Group by", value="Category")
+                value_select = ui.select(
+                    {}, multiple=True, label="Values (none = combined total)", value=[]
+                ).classes("min-w-[260px]")
+                account_select = ui.select(
+                    account_options, multiple=True, label="Accounts", value=list(account_options.keys())
+                ).classes("min-w-[220px]")
 
-        with ui.row().classes("items-center gap-2 flex-wrap"):
-            show_actual_check = ui.checkbox("Show Actual", value=True)
-            show_ma_check = ui.checkbox("Show Moving Average", value=True)
-            show_forecast_check = ui.checkbox("Show Forecast", value=True)
-            start_input = ui.input("Start", value=(today.replace(year=today.year - 1)).isoformat()).props(
-                "type=date"
-            )
-            end_input = ui.input("End", value=today.isoformat()).props("type=date")
-            ui.button("Refresh", on_click=lambda: render())
+            with ui.row().classes("items-center gap-2 flex-wrap"):
+                granularity_select = ui.select(GRANULARITIES, label="Granularity", value="Monthly")
+                ma_input = ui.number("MA window", value=3, min=1, max=24, format="%.0f").classes("w-28")
+                show_actual_check = ui.checkbox("Actual", value=True)
+                show_ma_check = ui.checkbox("Moving Average", value=True)
+                show_forecast_check = ui.checkbox("Forecast", value=True)
+
+            with ui.row().classes("items-center gap-2 flex-wrap"):
+                start_input = ui.input("Start", value=(today.replace(year=today.year - 1)).isoformat()).props(
+                    "type=date"
+                )
+                end_input = ui.input("End", value=today.isoformat()).props("type=date")
 
         summary_label = ui.label().style(f"color: {TEXT_MUTED};")
         plot = ui.plotly({}).classes("w-full")

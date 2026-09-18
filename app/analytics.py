@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.budgets import active_budget_items
 from app.forecast import generate_occurrences
 from app.models import BudgetItem, FlowType, VendorGroup
 from app.transactions import merchant_key, query_transactions
@@ -129,7 +130,7 @@ def expense_vs_forecast(
     for t in expenses:
         actual_by_bucket[_bucket_key(t.date, granularity)] += -t.amount
 
-    items_query = session.query(BudgetItem).filter(BudgetItem.flow_type == FlowType.EXPENSE)
+    items_query = active_budget_items(session).filter(BudgetItem.flow_type == FlowType.EXPENSE)
     if category_id is not None:
         items_query = items_query.filter(BudgetItem.category_id == category_id)
     items = items_query.all()

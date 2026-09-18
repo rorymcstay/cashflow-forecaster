@@ -7,10 +7,12 @@ from contextlib import contextmanager
 from nicegui import ui
 from sqlalchemy.orm import Session
 
+from app.budgets import get_active_budget, list_budgets, set_active_budget
 from app.db import get_session
 
 BG = "#14161B"
 SURFACE = "#1B1E25"
+SURFACE_ALT = "#21252E"
 BORDER = "#2C313C"
 TEXT = "#EDEFF2"
 TEXT_MUTED = "#8D95A3"
@@ -27,6 +29,7 @@ NAV_ITEMS = [
     ("/budget-items", "Budget Items"),
     ("/budget-builder", "Budget Builder"),
     ("/vendor-groups", "Vendor Groups"),
+    ("/budgets", "Budgets"),
     ("/upcoming-expenses", "Upcoming Expenses"),
     ("/statements", "Statements"),
     ("/transactions", "Transactions"),
@@ -43,9 +46,15 @@ ui.add_head_html(
     f"""
     <style>
         body {{ background-color: {BG}; color: {TEXT}; }}
-        .nav-link {{ color: {TEXT_MUTED}; text-decoration: none; padding: 4px 10px; border-radius: 6px; }}
-        .nav-link:hover {{ color: {TEXT}; background-color: {SURFACE}; }}
-        .nav-link-active {{ color: {TEXT} !important; background-color: {SURFACE}; font-weight: 600; }}
+        .nav-link {{
+            color: {TEXT_MUTED}; text-decoration: none; padding: 10px 16px; border-radius: 6px;
+            display: block;
+        }}
+        .nav-link:hover {{ color: {TEXT}; background-color: {SURFACE_ALT}; }}
+        .nav-link-active {{
+            color: {TEXT} !important; background-color: {SURFACE_ALT}; font-weight: 600;
+            border-left: 3px solid {ACCENT};
+        }}
         .stat-card {{ background-color: {SURFACE}; border: 1px solid {BORDER}; border-radius: 8px; padding: 12px 16px; }}
         .section-card {{ background-color: {SURFACE}; border: 1px solid {BORDER}; border-radius: 8px; padding: 16px; }}
     </style>
@@ -83,32 +92,46 @@ def get_page_session() -> Session:
 @contextmanager
 def page_shell(active_path: str, title: str):
     _apply_theme()
+
+    drawer = ui.left_drawer(value=True, bordered=True).style(
+        f"background-color: {SURFACE}; border-right: 1px solid {BORDER};"
+    )
+    with drawer:
+        ui.label("Budgeting").classes("text-lg font-bold px-4 pt-2 pb-1").style(f"color: {TEXT};")
+        for path, label in NAV_ITEMS:
+            classes = "nav-link" + (" nav-link-active" if path == active_path else "")
+            ui.link(label, path).classes(classes)
+
+    budget_session = get_session()
+    try:
+        budget_options = {b.id: b.name for b in list_budgets(budget_session, include_archived=False)}
+        active_budget_id = get_active_budget(budget_session).id
+    finally:
+        budget_session.close()
+
+    def on_budget_change(e) -> None:
+        if e.value == active_budget_id:
+            return
+        session = get_session()
+        try:
+            set_active_budget(session, e.value)
+            session.commit()
+        finally:
+            session.close()
+        ui.navigate.reload()
+
     with (
         ui.header()
         .classes("items-center")
         .style(f"background-color: {SURFACE}; border-bottom: 1px solid {BORDER};")
     ):
-        ui.label("Budgeting").classes("text-lg font-bold").style(f"color: {TEXT};")
+        ui.button(icon="menu", on_click=drawer.toggle).props("flat round dense color=white")
+        ui.label(title).classes("text-lg font-bold").style(f"color: {TEXT};")
+        ui.space()
+        ui.label("Budget:").style(f"color: {TEXT_MUTED};")
+        ui.select(budget_options, value=active_budget_id, on_change=on_budget_change).props(
+            "dense options-dense"
+        ).style("min-width: 160px;")
 
-        # Full link row on wide screens; 11 links wrap or overflow badly on a
-        # phone, so below the md breakpoint it collapses into a menu button
-        # instead — same destinations, just reached one tap deeper.
-        with ui.row().classes("gap-1 ml-6 hidden md:flex"):
-            for path, label in NAV_ITEMS:
-                classes = "nav-link" + (" nav-link-active" if path == active_path else "")
-                ui.link(label, path).classes(classes)
-
-        with (
-            ui.element("div").classes("ml-auto flex md:hidden"),
-            ui.button(icon="menu").props("flat round dense color=white"),
-            ui.menu().style(f"background-color: {SURFACE}; border: 1px solid {BORDER};"),
-        ):
-            for path, label in NAV_ITEMS:
-                item = ui.menu_item(label, on_click=lambda path=path: ui.navigate.to(path))
-                item.style(
-                    f"color: {TEXT if path == active_path else TEXT_MUTED};"
-                    + ("font-weight: 600;" if path == active_path else "")
-                )
     with ui.column().classes("w-full max-w-6xl mx-auto p-2 sm:p-4 gap-4") as content:
-        ui.label(title).classes("text-2xl font-bold").style(f"color: {TEXT};")
         yield content

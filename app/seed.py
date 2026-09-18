@@ -2,6 +2,7 @@ import datetime as dt
 
 from sqlalchemy.orm import Session
 
+from app.budgets import get_active_budget
 from app.models import Account, BudgetItem, Category, FlowType, Frequency, UpcomingExpense
 
 DEFAULT_ACCOUNTS = [
@@ -234,6 +235,7 @@ def seed_defaults(session: Session) -> None:
     # Only seed historical budget items / upcoming expenses once, on a
     # genuinely empty database — never re-insert on subsequent launches.
     if session.query(BudgetItem).count() == 0:
+        default_budget = get_active_budget(session)
         for description, amount, cat_name, acc_name, frequency, eff_from, notes in SEED_BUDGET_ITEMS:
             session.add(
                 BudgetItem(
@@ -246,6 +248,7 @@ def seed_defaults(session: Session) -> None:
                     notes=notes,
                     category=get_or_create_category(session, cat_name),
                     account=get_or_create_account(session, acc_name),
+                    budget=default_budget,
                 )
             )
         session.commit()
