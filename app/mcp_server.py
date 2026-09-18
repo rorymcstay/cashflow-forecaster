@@ -4,6 +4,7 @@ import datetime as dt
 from mcp.server.mcpserver import MCPServer
 
 from app import investment_sim, market_data
+from app.analytics import expense_vs_forecast as _expense_vs_forecast
 from app.db import get_session, init_db
 from app.forecast import (
     HypotheticalItem,
@@ -26,6 +27,7 @@ from app.models import (
     Transaction,
     UpcomingExpense,
     UpcomingExpenseStatus,
+    VendorGroup,
 )
 from app.scenario_sim import run_scenario as _run_scenario_core
 from app.seed import get_or_create_category, seed_defaults
@@ -40,6 +42,11 @@ from app.statements import (
     extract_csv_transactions,
     find_recurring_transactions as _find_recurring,
     read_pdf_text as _read_pdf_text,
+)
+from app.vendor_groups import (
+    create_vendor_group as _create_vendor_group,
+    list_vendor_groups as _list_vendor_groups,
+    update_vendor_group as _update_vendor_group,
 )
 
 server = MCPServer(
@@ -164,6 +171,17 @@ def _suggestion_to_dict(sg: BudgetSuggestion) -> dict:
         "created_at": sg.created_at.isoformat(),
         "decided_at": sg.decided_at.isoformat() if sg.decided_at else None,
     }
+
+
+def _vendor_group_to_dict(g: VendorGroup) -> dict:
+    return {"id": g.id, "name": g.name, "vendors": g.vendor_list}
+
+
+def _resolve_vendor_group(session, vendor_group_id: int) -> VendorGroup:
+    group = session.get(VendorGroup, vendor_group_id)
+    if group is None:
+        raise ValueError(f"No vendor group with id {vendor_group_id}.")
+    return group
 
 
 def _resolve_suggestion_status(value: str) -> SuggestionStatus:
@@ -965,6 +983,66 @@ def list_categories() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# vendor groups
+# ---------------------------------------------------------------------------
+
+
+@server.tool()
+def list_vendor_groups() -> list[dict]:
+    """List vendor groups: named collections of vendors (merchant keys) that
+    act as an alternative axis to Category — e.g. grouping "Uber"/"Bolt"
+    under "Rideshare" regardless of which category each transaction
+    classified into. Used by get_expense_insights's vendor_group filter."""
+    session = get_session()
+    try:
+        return [_vendor_group_to_dict(g) for g in _list_vendor_groups(session)]
+    finally:
+        session.close()
+
+
+@server.tool()
+def create_vendor_group(name: str, vendors: list[str] | None = None) -> dict:
+    """Create a vendor group. `vendors` are normalised merchant keys — see
+    list_transactions or find_recurring_transactions output for the exact
+    keys seen in imported statements (e.g. "UBER TRIP", "TESCO STORES")."""
+    session = get_session()
+    try:
+        group = _create_vendor_group(session, name, vendors)
+        session.commit()
+        return _vendor_group_to_dict(group)
+    finally:
+        session.close()
+
+
+@server.tool()
+def update_vendor_group(vendor_group_id: int, name: str, vendors: list[str] | None = None) -> dict:
+    """Rename a vendor group and/or replace its full vendor list."""
+    session = get_session()
+    try:
+        group = _resolve_vendor_group(session, vendor_group_id)
+        _update_vendor_group(group, name, vendors)
+        session.commit()
+        return _vendor_group_to_dict(group)
+    finally:
+        session.close()
+
+
+@server.tool()
+def delete_vendor_group(vendor_group_id: int) -> dict:
+    """Delete a vendor group. Doesn't touch the underlying transactions or
+    any budget item's own vendor scoping — only the group itself."""
+    session = get_session()
+    try:
+        group = _resolve_vendor_group(session, vendor_group_id)
+        name = group.name
+        session.delete(group)
+        session.commit()
+        return {"deleted": True, "id": vendor_group_id, "name": name}
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
 # budget items
 # ---------------------------------------------------------------------------
 
@@ -1386,6 +1464,77 @@ def get_low_balance_warnings(start_date: str, end_date: str) -> list[dict]:
     try:
         warnings = low_balance_warnings(session, _parse_date(start_date), _parse_date(end_date))
         return [{**w, "date": w["date"].isoformat()} for w in warnings]
+    finally:
+        session.close()
+
+
+@server.tool()
+def get_expense_insights(
+    start_date: str,
+    end_date: str,
+    granularity: str = "Monthly",
+    ma_window: int = 3,
+    category: str | None = None,
+    vendor_group_id: int | None = None,
+    account: str | None = None,
+) -> dict:
+    """Actual expense spend (bucketed Weekly/Monthly, plus a trailing
+    moving average over `ma_window` buckets) versus the spend implied by
+    matching budget items over the same range — a "forecast vs live"
+    comparison for finding trends and checking actuals against the budget.
+
+    Narrow by `category` (name) and/or `vendor_group_id` (see
+    list_vendor_groups) — both may be given together. Leaving both unset
+    covers every expense. `account` restricts which account's transactions
+    count as "actual" (forecast side is unaffected by account, since a
+    budget item's own account is a separate dimension already reflected in
+    get_cashflow_forecast).
+    """
+    session = get_session()
+    try:
+        category_id = None
+        if category is not None:
+            cat = session.query(Category).filter(Category.name == category).one_or_none()
+            if cat is None:
+                names = [c.name for c in session.query(Category).order_by(Category.name).all()]
+                raise ValueError(f"No category named '{category}'. Existing categories: {names}.")
+            category_id = cat.id
+
+        account_ids = None
+        if account is not None:
+            account_ids = [_resolve_account(session, account).id]
+
+        series = _expense_vs_forecast(
+            session,
+            granularity,
+            _parse_date(start_date),
+            _parse_date(end_date),
+            ma_window=ma_window,
+            category_id=category_id,
+            vendor_group_id=vendor_group_id,
+            account_ids=account_ids,
+        )
+        return {
+            "granularity": granularity,
+            "buckets": [
+                {
+                    "label": label,
+                    "start": start.isoformat(),
+                    "actual": actual,
+                    "actual_moving_avg": ma,
+                    "forecast": forecast,
+                }
+                for label, start, actual, ma, forecast in zip(
+                    series.bucket_labels,
+                    series.bucket_starts,
+                    series.actual,
+                    series.actual_moving_avg,
+                    series.forecast,
+                )
+            ],
+            "matched_transaction_count": series.matched_transaction_count,
+            "matched_budget_item_ids": series.matched_budget_item_ids,
+        }
     finally:
         session.close()
 

@@ -21,11 +21,13 @@ from app.ui.budget_items_screen import BudgetItemsScreen
 from app.ui.budget_view_screen import BudgetViewScreen
 from app.ui.cashflow_screen import CashflowForecastScreen
 from app.ui.dashboard_screen import DashboardScreen
+from app.ui.insights_screen import InsightsScreen
 from app.ui.investment_sim_screen import InvestmentSimScreen
 from app.ui.scenario_screen import ScenarioScreen
 from app.ui.statements_screen import StatementsScreen
 from app.ui.transactions_screen import TransactionsScreen
 from app.ui.upcoming_expenses_screen import UpcomingExpensesScreen
+from app.ui.vendor_groups_screen import VendorGroupsScreen
 
 
 def _build_header_bar() -> QWidget:
@@ -87,13 +89,17 @@ class MainWindow(QMainWindow):
         self.cashflow_screen = CashflowForecastScreen(self.session)
         self.scenario_screen = ScenarioScreen(self.session)
         self.investment_sim_screen = InvestmentSimScreen(self.session)
+        self.vendor_groups_screen = VendorGroupsScreen(self.session, on_change=self.on_data_changed)
+        self.insights_screen = InsightsScreen(self.session)
 
         self.tabs.addTab(self.dashboard_screen, "Dashboard")
         self.tabs.addTab(self.accounts_screen, "Accounts")
         self.tabs.addTab(self.cashflow_screen, "Cash Flow Forecast")
+        self.tabs.addTab(self.insights_screen, "Insights")
         self.tabs.addTab(self.scenario_screen, "Scenarios")
         self.tabs.addTab(self.budget_items_screen, "Budget Items")
         self.tabs.addTab(self.budget_builder_screen, "Budget Builder")
+        self.tabs.addTab(self.vendor_groups_screen, "Vendor Groups")
         self.tabs.addTab(self.upcoming_screen, "Upcoming Expenses")
         self.tabs.addTab(self.statements_screen, "Statements")
         self.tabs.addTab(self.transactions_screen, "Transactions")
@@ -117,6 +123,7 @@ class MainWindow(QMainWindow):
         self.cashflow_screen.refresh()
         self.scenario_screen.reload_accounts()
         self.investment_sim_screen.reload_accounts()
+        self.insights_screen.reload()
 
     def on_tab_changed(self, index: int):
         widget = self.tabs.widget(index)
@@ -142,6 +149,8 @@ class MainWindow(QMainWindow):
             self.scenario_screen.reload_accounts()
         elif widget is self.investment_sim_screen:
             self.investment_sim_screen.reload_accounts()
+        elif widget is self.insights_screen:
+            self.insights_screen.reload()
 
     def closeEvent(self, event):
         self.session.close()

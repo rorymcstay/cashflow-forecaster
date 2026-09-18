@@ -16,11 +16,13 @@ from app.web.pages import (  # noqa: F401
     budget_view,
     cashflow,
     dashboard,
+    insights,
     investment_sim,
     scenarios,
     statements,
     transactions,
     upcoming_expenses,
+    vendor_groups,
 )
 
 init_db()

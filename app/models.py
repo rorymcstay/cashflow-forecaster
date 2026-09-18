@@ -109,6 +109,34 @@ class Category(Base):
         return self.name
 
 
+class VendorGroup(Base):
+    """A named collection of vendors (merchant keys) that can be reported on
+    as a single unit — an alternative axis to Category for the Insights
+    screen (see app/analytics.py), e.g. grouping "Uber"/"Uber Eats"/"Bolt"
+    under "Rideshare & Delivery" regardless of which Category each
+    transaction happened to classify into."""
+
+    __tablename__ = "vendor_groups"
+    __table_args__ = (UniqueConstraint("name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    # Comma-separated normalised merchant keys — same convention/format as
+    # BudgetItem.vendors (see app/transactions.py merchant_key).
+    vendors: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+
+    def __repr__(self) -> str:
+        return self.name
+
+    @property
+    def vendor_list(self) -> list[str]:
+        return self.vendors.split(",") if self.vendors else []
+
+    @vendor_list.setter
+    def vendor_list(self, keys: list[str]) -> None:
+        self.vendors = ",".join(keys) if keys else None
+
+
 class BudgetItem(Base):
     """A committed, recurring payment (income or expense)."""
 

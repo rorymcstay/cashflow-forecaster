@@ -1,4 +1,5 @@
 import datetime as dt
+from types import SimpleNamespace
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy.orm import Session
 
+from app.budget_builder import vendor_options
 from app.forecast import account_run_rate
 from app.models import (
     Account,
@@ -31,9 +33,13 @@ from app.models import (
     Transaction,
     UpcomingExpense,
     UpcomingExpenseStatus,
+    VendorGroup,
 )
 from app.seed import get_or_create_category
+from app.transactions import query_transactions
 from app.ui import theme
+from app.ui.widgets import AccountMultiSelect
+from app.vendor_groups import create_vendor_group, update_vendor_group
 
 
 def _to_qdate(d: dt.date) -> QDate:
@@ -759,5 +765,60 @@ class UpcomingExpenseDialog(QDialog):
             self.obj.account_id = account_id
             self.obj.target_account_id = target_account_id
 
+        self.session.commit()
+        self.accept()
+
+
+class VendorGroupDialog(QDialog):
+    def __init__(self, session: Session, obj: VendorGroup | None = None, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.obj = obj
+        self.setWindowTitle("Edit Vendor Group" if obj else "Add Vendor Group")
+        self.setMinimumWidth(360)
+
+        self.name_edit = QLineEdit(obj.name if obj else "")
+
+        transactions = query_transactions(session)
+        vendors = vendor_options(transactions)
+        vendor_items = [SimpleNamespace(id=v.key, name=f"{v.label} ({v.transaction_count})") for v in vendors]
+        self.vendor_select = AccountMultiSelect(
+            self, noun="vendor", noun_plural="vendors", all_selected_label="All Vendors"
+        )
+        self.vendor_select.set_accounts(
+            vendor_items, default_all_checked=False, default_checked_ids=set(obj.vendor_list) if obj else None
+        )
+
+        form = QFormLayout()
+        form.addRow("Name", self.name_edit)
+        form.addRow("Vendors", self.vendor_select)
+        hint = QLabel("Vendors are matched by merchant, the same grouping used across the app.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        form.addRow(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.on_accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.setLayout(form)
+
+    def on_accept(self):
+        name = self.name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Missing name", "Please enter a name.")
+            return
+        existing = self.session.query(VendorGroup).filter(VendorGroup.name == name).one_or_none()
+        if existing is not None and existing is not self.obj:
+            QMessageBox.warning(self, "Name in use", f"A vendor group named '{name}' already exists.")
+            return
+
+        vendor_keys = self.vendor_select.checked_ids()
+        if self.obj is None:
+            create_vendor_group(self.session, name, vendor_keys)
+        else:
+            update_vendor_group(self.obj, name, vendor_keys)
         self.session.commit()
         self.accept()
