@@ -18,6 +18,8 @@ statements.
 
 import datetime as dt
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 
 import pdfplumber
@@ -285,6 +287,204 @@ def parse_amex(path: Path, period: tuple[dt.date, dt.date] | None = None) -> lis
             }
         )
     return transactions
+
+
+# ---------------------------------------------------------------------------
+# Trading 212 "Confirmation of holdings" — a point-in-time snapshot of an
+# investment account's positions (instrument, ISIN, quantity, price), not a
+# list of transactions like the two formats above. Kept as its own
+# detect/parse pair (parse_holdings_statement) rather than folded into
+# parse_pdf_statement, since callers there expect a `transactions` list and
+# there simply isn't one in this document.
+#
+# Trading 212 embeds a subsetted variable font ("Aeonik212VF...") whose
+# ToUnicode map is broken for digits and some letters (e.g. 'a'): the glyphs
+# still render correctly on screen/in print, but pdfplumber's text
+# extraction returns them as blank — silently dropping every number, the
+# customer's ISIN, and even words like "Trading". Regular text extraction is
+# therefore useless here; this renders the page to an image and OCRs it with
+# tesseract instead, which sees exactly what a human would.
+# ---------------------------------------------------------------------------
+
+_TRADING212_FONT_HINT = "Aeonik212"
+
+_T212_DATE_RE = re.compile(r"as of\s+(\d{1,2})/(\d{1,2})/(\d{4})", re.IGNORECASE)
+_T212_VALUE_RE = re.compile(r"Holdings value:?\s*([\d,]+\.\d+)\s*([A-Z]{3})", re.IGNORECASE)
+_T212_ACCOUNT_RE = re.compile(r"^Trading\s*212\s+([A-Za-z][A-Za-z ]*[A-Za-z])$")
+_T212_ROW_RE = re.compile(
+    r"^(?P<instrument>.+?)\s+(?P<isin>[A-Za-z0-9]{12})\s+(?P<quantity>[\d,]+(?:\.\d+)?)\s+"
+    r"(?:(?P<currency>[A-Z]{3})\s+)?(?P<price>[\d,]+\.\d+)\s*$"
+)
+
+# ISIN -> Yahoo Finance ticker for instruments we've actually held. There's
+# no general ISIN->ticker mapping available offline, so this only resolves
+# what's been added here — anything else comes back with ticker=None for a
+# human to fill in before calling set_holdings, rather than being guessed at.
+_T212_ISIN_TICKERS = {
+    "IE00BFMXXD54": "VUAG.L",  # Vanguard S&P 500 UCITS ETF (Acc)
+    "IE00B3XXRP09": "VUSA.L",  # Vanguard S&P 500 UCITS ETF (Dist)
+}
+
+
+def _uses_trading212_font(path: Path) -> bool:
+    with pdfplumber.open(path) as pdf:
+        return any(_TRADING212_FONT_HINT in (c.get("fontname") or "") for c in pdf.pages[0].chars)
+
+
+def detect_holdings_kind(path: Path) -> str | None:
+    if _uses_trading212_font(path):
+        return "trading212"
+    return None
+
+
+def _ocr_first_page(path: Path, resolution: int = 300) -> str:
+    """Render the first page to an image and OCR it. Raises a clear error if
+    the `tesseract` binary isn't installed, rather than an opaque
+    FileNotFoundError from subprocess."""
+    with pdfplumber.open(path) as pdf:
+        image = pdf.pages[0].to_image(resolution=resolution)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        png_path = Path(tmp_dir) / "page.png"
+        image.save(str(png_path))
+        try:
+            result = subprocess.run(
+                ["tesseract", str(png_path), "stdout"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Reading a Trading 212 holdings PDF requires the `tesseract` OCR binary "
+                "(its embedded font's text layer is broken for digits) — install it, e.g. "
+                "`brew install tesseract`."
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"OCR of the holdings PDF failed: {exc.stderr}") from exc
+    return result.stdout
+
+
+def _resolve_isin_ticker(raw_isin: str) -> tuple[str, str | None]:
+    """Clean up an OCR'd ISIN and look up its ticker. OCR reliably confuses
+    the digit 0 with the letter O in these documents (e.g. "IE00..." reads
+    as "IEOO..."); rather than blanket-correcting that (which could just as
+    easily mangle a genuine letter), only apply the swap when it turns an
+    unrecognised ISIN into one we actually know — an ISIN that doesn't match
+    either way is returned as-is with ticker=None instead of being guessed
+    at, since a wrong ticker would silently corrupt the account's weights."""
+    isin = raw_isin.upper()
+    if isin in _T212_ISIN_TICKERS:
+        return isin, _T212_ISIN_TICKERS[isin]
+    swapped = isin.replace("O", "0")
+    if swapped in _T212_ISIN_TICKERS:
+        return swapped, _T212_ISIN_TICKERS[swapped]
+    return isin, None
+
+
+def parse_trading212_holdings(file_path: str | Path) -> dict:
+    """Parse a Trading 212 "Confirmation of holdings" PDF. Returns:
+      - as_of: ISO date the snapshot is valid as of (None if not found)
+      - account_hint: the Trading 212 product name (e.g. "Trading 212 Stocks
+        ISA") to match against list_accounts' names, like parse_pdf_statement's
+        account_hint
+      - currency, holdings_value: the document's own stated total
+      - holdings: [{instrument, isin, ticker, quantity, price, value}] — value
+        is quantity*price, computed rather than parsed, since the document
+        doesn't state it per-row
+      - reconciliation: holdings_value vs the sum of computed values, the
+        same cross-check parse_pdf_statement does against a statement's
+        summary line, to catch an OCR/parsing mistake instead of silently
+        importing wrong numbers
+
+    This only reads the file — apply the result with set_holdings (weights =
+    each holding's value) and update_account (current_balance =
+    holdings_value, balance_as_of = as_of) yourself.
+    """
+    path = Path(file_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"No such file: {path}")
+
+    text = _ocr_first_page(path)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    date_m = _T212_DATE_RE.search(text)
+    as_of = dt.date(int(date_m.group(3)), int(date_m.group(2)), int(date_m.group(1))) if date_m else None
+
+    value_m = _T212_VALUE_RE.search(text)
+    holdings_value = float(value_m.group(1).replace(",", "")) if value_m else None
+    currency = value_m.group(2).upper() if value_m else None
+
+    account_hint = None
+    for ln in lines:
+        m = _T212_ACCOUNT_RE.match(ln)
+        if m:
+            account_hint = f"Trading 212 {m.group(1).strip()}"
+            break
+
+    holdings: list[dict] = []
+    header_idx = next(
+        (i for i, ln in enumerate(lines) if "ISIN" in ln.upper() and "QUANTITY" in ln.upper()), None
+    )
+    if header_idx is not None:
+        for ln in lines[header_idx + 1 :]:
+            m = _T212_ROW_RE.match(ln)
+            if not m:
+                break  # holding rows are contiguous right after the header
+            isin, ticker = _resolve_isin_ticker(m.group("isin"))
+            quantity = float(m.group("quantity").replace(",", ""))
+            price = float(m.group("price").replace(",", ""))
+            holdings.append(
+                {
+                    "instrument": m.group("instrument").strip(),
+                    "isin": isin,
+                    "ticker": ticker,
+                    "quantity": quantity,
+                    "price": price,
+                    "value": round(quantity * price, 2),
+                }
+            )
+
+    reconciliation = None
+    if holdings_value is not None:
+        computed = round(sum(h["value"] for h in holdings), 2)
+        reconciliation = {
+            "expected_value": holdings_value,
+            "computed_value": computed,
+            "ok": abs(holdings_value - computed) < 0.01,
+        }
+
+    return {
+        "kind": "trading212",
+        "as_of": as_of.isoformat() if as_of else None,
+        "account_hint": account_hint,
+        "currency": currency,
+        "holdings_value": holdings_value,
+        "holdings": holdings,
+        "reconciliation": reconciliation,
+    }
+
+
+def parse_holdings_statement(file_path: str) -> dict:
+    """Detect a broker holdings-confirmation PDF's format and parse it.
+    Currently recognises Trading 212's "Confirmation of holdings" export.
+    Returns kind=None (empty holdings) for anything else, so callers can
+    fall back to read_pdf_statement / manual interpretation."""
+    path = Path(file_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"No such file: {path}")
+
+    kind = detect_holdings_kind(path)
+    if kind is None:
+        return {
+            "kind": None,
+            "as_of": None,
+            "account_hint": None,
+            "currency": None,
+            "holdings_value": None,
+            "holdings": [],
+            "reconciliation": None,
+        }
+    return parse_trading212_holdings(path)
 
 
 # ---------------------------------------------------------------------------

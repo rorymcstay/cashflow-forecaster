@@ -44,6 +44,7 @@ from app.models import (
     UpcomingExpenseStatus,
     VendorGroup,
 )
+from app.pdf_statement_parsers import parse_holdings_statement as _parse_holdings_statement
 from app.scenario_sim import run_scenario as _run_scenario_core
 from app.seed import get_or_create_category, seed_defaults
 from app.statement_import import (
@@ -320,6 +321,36 @@ def find_recurring_transactions(
     in the first place.
     """
     return _find_recurring(transactions, min_occurrences, amount_tolerance_pct)
+
+
+@server.tool()
+def read_holdings_statement(file_path: str) -> dict:
+    """Parse a broker "confirmation of holdings" PDF — a point-in-time snapshot of an
+    investment account's positions (instrument, ISIN, quantity, price), not a
+    transaction statement. Contrast with read_pdf_statement/extract_csv_statement +
+    import_statement, which are for transaction history. Currently recognises Trading
+    212's "Confirmation of holdings" export; kind=None (empty holdings) for anything
+    else.
+
+    Returns:
+      - as_of: ISO date the snapshot is valid as of
+      - account_hint: a name to match against list_accounts (e.g. "Trading 212 Stocks ISA")
+      - currency, holdings_value: the document's own stated total
+      - holdings: [{instrument, isin, ticker, quantity, price, value}] — ticker comes
+        from a small known-ISIN lookup table and is None for anything unseen before;
+        resolve it yourself (e.g. from the instrument name) before using it
+      - reconciliation: holdings_value vs the sum of computed per-holding values, to
+        catch an OCR/parsing mistake before you act on it — check reconciliation.ok
+        before importing
+
+    This only reads the file. To apply it: set_holdings(account, weights) using each
+    holding's `value` as its weight (falling back to the instrument name as the key
+    for any holding with ticker=None — set_holdings doesn't require real tickers, but
+    the forecast/simulation tools can only price a weight they recognise as a ticker),
+    and update_account(account, current_balance=holdings_value, balance_as_of=as_of)
+    to sync the account's balance to this snapshot.
+    """
+    return _parse_holdings_statement(file_path)
 
 
 # ---------------------------------------------------------------------------
