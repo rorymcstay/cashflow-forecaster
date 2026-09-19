@@ -37,9 +37,11 @@ def budget_view_page():
 
         with ui.row().classes("items-center gap-2"):
             as_of_input = ui.input("As of", value=dt.date.today().isoformat()).props("type=date")
-            exclude_select = ui.select(
-                account_options, multiple=True, label="Exclude accounts", value=[]
-            ).classes("min-w-[260px]")
+            exclude_select = (
+                ui.select(account_options, multiple=True, label="Exclude accounts", value=[])
+                .classes("min-w-[260px]")
+                .props("clearable")
+            )
             ui.button("Refresh", on_click=lambda: render())
 
         with ui.row().classes("gap-6 w-full items-start"):

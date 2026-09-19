@@ -6,6 +6,7 @@ from mcp.server.mcpserver import MCPServer
 from app import investment_sim, market_data
 from app.analytics import expense_vs_forecast as _expense_vs_forecast
 from app.budget_recommender import recommend_budget as _recommend_budget_core
+from app.vendor_group_recommender import recommend_vendor_groups as _recommend_vendor_groups
 from app.budgets import (
     active_budget_items,
     archive_budget as _archive_budget,
@@ -1088,6 +1089,31 @@ def delete_vendor_group(vendor_group_id: int) -> dict:
         session.delete(group)
         session.commit()
         return {"deleted": True, "id": vendor_group_id, "name": name}
+    finally:
+        session.close()
+
+
+@server.tool()
+def suggest_vendor_groups(account: str | None = None) -> list[dict]:
+    """Propose candidate vendor groups from transaction history — not yet
+    created. Buckets recurring vendors (find_recurring_transactions) that
+    share a classified category and aren't already in any vendor group;
+    categories with at least two such vendors are proposed as a group
+    (e.g. "Groceries": TESCO, ALDI, WAITROSE). Pass name/vendors straight to
+    create_vendor_group to accept one."""
+    session = get_session()
+    try:
+        account_ids = [_resolve_account(session, account).id] if account else None
+        suggestions = _recommend_vendor_groups(session, account_ids=account_ids)
+        return [
+            {
+                "name": s.name,
+                "vendor_keys": s.vendor_keys,
+                "vendor_labels": s.vendor_labels,
+                "rationale": s.rationale,
+            }
+            for s in suggestions
+        ]
     finally:
         session.close()
 

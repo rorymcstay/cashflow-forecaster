@@ -31,15 +31,18 @@ def _tx(statement, date, description, amount, category=None):
 
 
 def test_recurring_bill_produces_high_confidence_vendor_line(session):
+    # URBAN JUNGLE classifies as "Insurance" — deliberately not a lifestyle
+    # category (Eating out/Subscriptions), which get pooled instead; see
+    # test_lifestyle_category_vendors_are_pooled_into_one_line_per_category.
     account = Account(name="Current")
     session.add(account)
     session.flush()
     statement = _make_statement(session, account, dt.date(2026, 1, 1), dt.date(2026, 3, 31))
     session.add_all(
         [
-            _tx(statement, dt.date(2026, 1, 10), "NETFLIX.COM 111111", -9.99),
-            _tx(statement, dt.date(2026, 2, 10), "NETFLIX.COM 222222", -9.99),
-            _tx(statement, dt.date(2026, 3, 10), "NETFLIX.COM 333333", -9.99),
+            _tx(statement, dt.date(2026, 1, 10), "URBAN JUNGLE INS 111111", -9.99),
+            _tx(statement, dt.date(2026, 2, 10), "URBAN JUNGLE INS 222222", -9.99),
+            _tx(statement, dt.date(2026, 3, 10), "URBAN JUNGLE INS 333333", -9.99),
         ]
     )
     session.commit()
@@ -48,11 +51,73 @@ def test_recurring_bill_produces_high_confidence_vendor_line(session):
 
     assert len(recs) == 1
     line = recs[0]
-    assert line.vendor_keys == ["NETFLIX COM"]
+    assert line.vendor_keys == ["URBAN JUNGLE INS"]
     assert line.amount == pytest.approx(9.99)
     assert line.frequency == Frequency.MONTHLY
     assert line.flow_type == FlowType.EXPENSE
     assert line.account_id == account.id
+    assert "High-confidence" in line.rationale
+
+
+def test_lifestyle_category_vendors_are_pooled_into_one_line_per_category(session):
+    account = Account(name="Current")
+    session.add(account)
+    session.flush()
+    statement = _make_statement(session, account, dt.date(2026, 1, 1), dt.date(2026, 3, 31))
+    session.add_all(
+        [
+            # Eating out: a frequently-visited coffee shop (would otherwise
+            # qualify as its own high-confidence recurring line) plus a
+            # one-off pub visit — both should collapse into one pooled line.
+            _tx(statement, dt.date(2026, 1, 5), "COSTA COFFEE 111111", -4.5),
+            _tx(statement, dt.date(2026, 2, 5), "COSTA COFFEE 222222", -4.5),
+            _tx(statement, dt.date(2026, 3, 5), "COSTA COFFEE 333333", -4.5),
+            _tx(statement, dt.date(2026, 1, 20), "THE KINGS ARMS", -25.0),
+            # Subscriptions: a clean recurring one plus a one-off.
+            _tx(statement, dt.date(2026, 1, 10), "NETFLIX.COM 111111", -9.99),
+            _tx(statement, dt.date(2026, 2, 10), "NETFLIX.COM 222222", -9.99),
+            _tx(statement, dt.date(2026, 3, 10), "NETFLIX.COM 333333", -9.99),
+            _tx(statement, dt.date(2026, 1, 15), "SPOTIFY PREMIUM", -10.99),
+        ]
+    )
+    session.commit()
+
+    recs = recommend_budget(session, lookback_days=365, account_ids=[account.id])
+
+    by_category = {line.category_name: line for line in recs}
+    assert set(by_category) == {"Eating out", "Subscriptions"}
+
+    eating_out = by_category["Eating out"]
+    assert eating_out.description == "Eating out (pooled)"
+    assert set(eating_out.vendor_keys) == {"COSTA COFFEE", "THE KINGS ARMS"}
+
+    subscriptions = by_category["Subscriptions"]
+    assert subscriptions.description == "Subscriptions (pooled)"
+    assert set(subscriptions.vendor_keys) == {"NETFLIX COM", "SPOTIFY PREMIUM"}
+
+
+def test_standing_order_looking_lifestyle_vendor_is_kept_individual(session):
+    # Matches the "Subscriptions" keyword bank (NETFLIX) but also looks like
+    # a standing order — must stay an individual line, not get pooled.
+    account = Account(name="Current")
+    session.add(account)
+    session.flush()
+    statement = _make_statement(session, account, dt.date(2026, 1, 1), dt.date(2026, 3, 31))
+    session.add_all(
+        [
+            _tx(statement, dt.date(2026, 1, 10), "NETFLIX STANDING ORDER", -9.99),
+            _tx(statement, dt.date(2026, 2, 10), "NETFLIX STANDING ORDER", -9.99),
+            _tx(statement, dt.date(2026, 3, 10), "NETFLIX STANDING ORDER", -9.99),
+        ]
+    )
+    session.commit()
+
+    recs = recommend_budget(session, lookback_days=365, account_ids=[account.id])
+
+    assert len(recs) == 1
+    line = recs[0]
+    assert line.vendor_keys == ["NETFLIX STANDING ORDER"]
+    assert "pooled" not in line.description
     assert "High-confidence" in line.rationale
 
 

@@ -261,6 +261,30 @@ class TransactionsScreen(QWidget):
         chart_view.setMinimumHeight(320)
         return chart, chart_view
 
+    def _add_bar_axes(self, chart: QChart) -> tuple[QBarCategoryAxis, QValueAxis]:
+        """Axes added once and reused for the life of the chart. Rebuilding
+        them from scratch on every refresh (removeAxis + a fresh
+        QBarCategoryAxis/QValueAxis) is what _rebuild_category_chart and
+        _rebuild_monthly_chart used to do, and it's a real PySide6/QtCharts
+        crash risk: QChart.removeAllSeries() deletes the series it held, but
+        removeAxis() does not delete the axis, and repeating that
+        add/remove cycle in quick succession (e.g. refreshing several times
+        in a row) can segfault. Series are still recreated each refresh
+        (removeAllSeries() explicitly deletes them, which is documented and
+        safe) — only the axes are long-lived; refreshing just updates their
+        categories/range and reattaches the new series."""
+        axis_x = QBarCategoryAxis()
+        axis_x.setLabelsAngle(-45)
+        self._style_axis(axis_x)
+        chart.addAxis(axis_x, Qt.AlignmentFlag.AlignBottom)
+
+        axis_y = QValueAxis()
+        axis_y.setLabelFormat("£%.0f")
+        self._style_axis(axis_y)
+        chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
+
+        return axis_x, axis_y
+
     def _style_axis(self, axis) -> None:
         axis.setLabelsColor(QColor(theme.TEXT_MUTED))
         axis.setGridLineColor(QColor(theme.BORDER))
@@ -290,6 +314,7 @@ class TransactionsScreen(QWidget):
 
         charts_row = QHBoxLayout()
         self.category_chart, category_chart_view = self._build_chart_view("Spend by Category")
+        self.category_axis_x, self.category_axis_y = self._add_bar_axes(self.category_chart)
         charts_row.addWidget(category_chart_view, stretch=1)
 
         merchants_col = QVBoxLayout()
@@ -306,6 +331,7 @@ class TransactionsScreen(QWidget):
         layout.addLayout(charts_row)
 
         self.monthly_chart, monthly_chart_view = self._build_chart_view("Income vs Expense by Month")
+        self.monthly_axis_x, self.monthly_axis_y = self._add_bar_axes(self.monthly_chart)
         layout.addWidget(monthly_chart_view)
 
         layout.addStretch()
@@ -313,9 +339,9 @@ class TransactionsScreen(QWidget):
 
     def _rebuild_category_chart(self, rows: list[dict]) -> None:
         self.category_chart.removeAllSeries()
-        for axis in list(self.category_chart.axes()):
-            self.category_chart.removeAxis(axis)
+        self.category_axis_x.clear()
         if not rows:
+            self.category_axis_y.setRange(0, 1)
             return
 
         bar_set = QBarSet("Spend")
@@ -327,26 +353,18 @@ class TransactionsScreen(QWidget):
             bar_set.setColor(QColor(_CATEGORY_COLORS[i % len(_CATEGORY_COLORS)]))
         self.category_chart.addSeries(series)
 
-        axis_x = QBarCategoryAxis()
-        axis_x.append([r["category"] for r in rows])
-        axis_x.setLabelsAngle(-45)
-        self._style_axis(axis_x)
-        self.category_chart.addAxis(axis_x, Qt.AlignmentFlag.AlignBottom)
-        series.attachAxis(axis_x)
+        self.category_axis_x.append([r["category"] for r in rows])
+        series.attachAxis(self.category_axis_x)
 
-        axis_y = QValueAxis()
-        axis_y.setLabelFormat("£%.0f")
         max_amount = max((r["amount"] for r in rows), default=0.0)
-        axis_y.setRange(0, max_amount * 1.15 if max_amount else 1)
-        self._style_axis(axis_y)
-        self.category_chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
-        series.attachAxis(axis_y)
+        self.category_axis_y.setRange(0, max_amount * 1.15 if max_amount else 1)
+        series.attachAxis(self.category_axis_y)
 
     def _rebuild_monthly_chart(self, rows: list[dict]) -> None:
         self.monthly_chart.removeAllSeries()
-        for axis in list(self.monthly_chart.axes()):
-            self.monthly_chart.removeAxis(axis)
+        self.monthly_axis_x.clear()
         if not rows:
+            self.monthly_axis_y.setRange(0, 1)
             return
 
         income_set = QBarSet("Income")
@@ -361,20 +379,12 @@ class TransactionsScreen(QWidget):
         self.monthly_chart.addSeries(series)
         self.monthly_chart.legend().setVisible(True)
 
-        axis_x = QBarCategoryAxis()
-        axis_x.append([r["month_label"] for r in rows])
-        axis_x.setLabelsAngle(-45)
-        self._style_axis(axis_x)
-        self.monthly_chart.addAxis(axis_x, Qt.AlignmentFlag.AlignBottom)
-        series.attachAxis(axis_x)
+        self.monthly_axis_x.append([r["month_label"] for r in rows])
+        series.attachAxis(self.monthly_axis_x)
 
-        axis_y = QValueAxis()
-        axis_y.setLabelFormat("£%.0f")
         max_amount = max((max(r["income"], r["expense"]) for r in rows), default=0.0)
-        axis_y.setRange(0, max_amount * 1.15 if max_amount else 1)
-        self._style_axis(axis_y)
-        self.monthly_chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
-        series.attachAxis(axis_y)
+        self.monthly_axis_y.setRange(0, max_amount * 1.15 if max_amount else 1)
+        series.attachAxis(self.monthly_axis_y)
 
     def _rebuild_merchants_table(self, rows: list[dict]) -> None:
         self.merchants_table.setRowCount(0)

@@ -34,9 +34,13 @@ def cashflow_page():
         with ui.row().classes("items-center gap-2 flex-wrap"):
             start_input = ui.input("Start", value=month_start.isoformat()).props("type=date")
             end_input = ui.input("End", value=month_end.isoformat()).props("type=date")
-            account_select = ui.select(
-                account_options, multiple=True, label="Accounts", value=list(account_options.keys())
-            ).classes("min-w-[260px]")
+            account_select = (
+                ui.select(
+                    account_options, multiple=True, label="Accounts", value=list(account_options.keys())
+                )
+                .classes("min-w-[260px]")
+                .props("clearable")
+            )
             freq_select = ui.select(CHART_FREQUENCIES, label="Chart points", value="Daily")
             split_check = ui.checkbox("Split chart by account")
             rebase_check = ui.checkbox("Rebase to 0 (change since start)")

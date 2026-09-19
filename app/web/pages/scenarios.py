@@ -33,7 +33,7 @@ def scenarios_page():
             account_select = (
                 ui.select(account_options, label="Accounts", multiple=True, value=list(account_options))
                 .classes("min-w-[220px]")
-                .props("use-chips")
+                .props("use-chips clearable")
             )
             horizon_input = ui.number("Horizon (years)", value=5, min=1, max=10, format="%.0f")
             paths_input = ui.number("Simulation paths", value=500, min=50, max=5000, format="%.0f")

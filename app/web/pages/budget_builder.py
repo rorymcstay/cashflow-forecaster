@@ -52,7 +52,7 @@ def budget_builder_page():
                     vendor_select_options, label="Vendors (any of)", multiple=True, value=[], with_input=True
                 )
                 .classes("min-w-[190px]")
-                .props("use-chips")
+                .props("use-chips clearable")
             )
             category_select = ui.select(category_options, label="Category", value=None).classes(
                 "min-w-[150px]"
@@ -65,7 +65,7 @@ def budget_builder_page():
                     value=list(account_options.keys()),
                 )
                 .classes("min-w-[220px]")
-                .props("use-chips")
+                .props("use-chips clearable")
             )
             interval_select = ui.select(
                 {f.value: f.value for f in Frequency},

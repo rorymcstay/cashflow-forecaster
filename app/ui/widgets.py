@@ -200,6 +200,30 @@ class AccountMultiSelect(QPushButton):
 
             search_edit.textChanged.connect(apply_filter)
 
+        clear_btn = QPushButton("Clear selection", popup)
+        clear_btn.setFlat(True)
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_btn.setStyleSheet(
+            f"text-align: left; color: {theme.TEXT_MUTED}; border: none; padding: 4px 2px;"
+        )
+
+        def clear_selection() -> None:
+            if not self._checked:
+                return
+            # Block signals while unchecking every row so on_item_changed
+            # doesn't fire (and re-emit selectionChanged) once per item —
+            # update the model once and emit a single, final signal instead.
+            list_widget.blockSignals(True)
+            for row in range(list_widget.count()):
+                list_widget.item(row).setCheckState(Qt.CheckState.Unchecked)
+            list_widget.blockSignals(False)
+            self._checked.clear()
+            self._update_label()
+            self.selectionChanged.emit()
+
+        clear_btn.clicked.connect(clear_selection)
+        layout.addWidget(clear_btn)
+
         popup.setMinimumWidth(max(self.width(), 220))
         popup.move(self.mapToGlobal(self.rect().bottomLeft()))
         popup.show()

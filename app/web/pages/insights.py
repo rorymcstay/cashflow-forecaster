@@ -39,12 +39,18 @@ def insights_page():
         with ui.expansion("Filters", value=True, icon="tune").classes("w-full section-card"):
             with ui.row().classes("items-center gap-2 flex-wrap"):
                 group_by_select = ui.select(GROUP_BY_OPTIONS, label="Group by", value="Category")
-                value_select = ui.select(
-                    {}, multiple=True, label="Values (none = combined total)", value=[]
-                ).classes("min-w-[260px]")
-                account_select = ui.select(
-                    account_options, multiple=True, label="Accounts", value=list(account_options.keys())
-                ).classes("min-w-[220px]")
+                value_select = (
+                    ui.select({}, multiple=True, label="Values (none = combined total)", value=[])
+                    .classes("min-w-[260px]")
+                    .props("clearable")
+                )
+                account_select = (
+                    ui.select(
+                        account_options, multiple=True, label="Accounts", value=list(account_options.keys())
+                    )
+                    .classes("min-w-[220px]")
+                    .props("clearable")
+                )
 
             with ui.row().classes("items-center gap-2 flex-wrap"):
                 granularity_select = ui.select(GRANULARITIES, label="Granularity", value="Monthly")

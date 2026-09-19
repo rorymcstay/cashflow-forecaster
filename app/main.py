@@ -65,7 +65,7 @@ class MainWindow(QMainWindow):
         self.cashflow_screen = CashflowForecastScreen(self.session)
         self.scenario_screen = ScenarioScreen(self.session)
         self.investment_sim_screen = InvestmentSimScreen(self.session)
-        self.vendor_groups_screen = VendorGroupsScreen(self.session, on_change=self.on_data_changed)
+        self.vendor_groups_screen = VendorGroupsScreen(self.session, on_change=self._on_vendor_groups_changed)
         self.insights_screen = InsightsScreen(self.session)
         self.budgets_screen = BudgetsScreen(self.session, on_change=self._on_budgets_changed)
 
@@ -225,6 +225,14 @@ class MainWindow(QMainWindow):
 
     def _on_budgets_changed(self):
         self.on_data_changed()
+
+    def _on_vendor_groups_changed(self):
+        # Vendor groups only ever affect the Insights screen's vendor-group
+        # axis — nothing else reads them — so this deliberately skips the
+        # full on_data_changed() cascade (which re-renders every other
+        # screen, including Transactions' category chart) rather than
+        # refreshing eight unrelated screens on every single group created.
+        self.insights_screen.reload()
 
     def on_data_changed(self):
         self.dashboard_screen.reload_accounts()

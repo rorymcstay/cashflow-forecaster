@@ -311,7 +311,7 @@ def statements_page():
                     value=[a.id for a in all_accounts if a.id in accounts_with_history],
                 )
                 .classes("min-w-[190px]")
-                .props("use-chips")
+                .props("use-chips clearable")
             )
             gap_start_input = ui.input(
                 "From", value=(dt.date.today() - dt.timedelta(days=365)).isoformat()

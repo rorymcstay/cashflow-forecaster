@@ -19,19 +19,31 @@ rather than reinventing either:
                     average amount
            too irregular to call a vendor-level bill at all
              -> left for the category catch-all below
-      -> whatever's left, grouped by category: take the 3-month trailing
-         moving average of that category's monthly spend on this account
+      -> whatever's left over from non-lifestyle categories, grouped by
+         category: take the 3-month trailing moving average of that
+         category's monthly spend on this account
          (app.analytics.expense_vs_forecast) and, if it clears
          MIN_MONTHLY_AMOUNT, propose a whole-category monthly line
          ("category_catchall", low confidence)
+
+Before any of the above runs, LIFESTYLE_CATEGORIES (Eating out,
+Subscriptions — vendor-name classified, same as everywhere else) are split
+out and pooled into one line per category instead: a coffee shop visited
+twice and a pub visited once are each too sparse/small to deserve their own
+budget line, but collectively they're real, regular spend worth a single
+line. A description that looks like a standing order is always exempted
+from this pooling and flows through the normal per-vendor path — a standing
+order is usually a distinct, deliberate commitment (rent, a loan repayment)
+that shouldn't be diluted into a lifestyle-spending average.
 """
 
 import datetime as dt
+import re
 
 from sqlalchemy.orm import Session
 
 from app.analytics import expense_vs_forecast
-from app.budget_builder import StagedLine, uncaptured_transactions, vendor_options
+from app.budget_builder import StagedLine, aggregate_spend, uncaptured_transactions, vendor_options
 from app.classify import classify
 from app.models import Account, Frequency, FlowType
 from app.statement_import import UNCATEGORIZED
@@ -44,7 +56,73 @@ MIN_OCCURRENCES = 2
 MIN_MONTHLY_AMOUNT = 5.0
 DEFAULT_LOOKBACK_DAYS = 365
 
+# Small/varied spend worth pooling into one line per category rather than
+# one line per vendor — see module docstring. Names match classify.py's
+# CATEGORY_KEYWORDS keys exactly, since "looks like a pub/restaurant/coffee
+# shop" or "looks like a subscription" is itself just name-based
+# classification, and reusing it keeps one definition of what those mean
+# rather than a second keyword bank drifting out of sync with the first.
+LIFESTYLE_CATEGORIES = {"Eating out", "Subscriptions"}
+
+_STANDING_ORDER_PATTERN = re.compile(r"STANDING\s*ORDER|\bSTO\b|\bS/O\b", re.IGNORECASE)
+
 _FREQUENCY_BY_LABEL = {f.value: f for f in Frequency}
+
+
+def _looks_like_standing_order(description: str) -> bool:
+    return _STANDING_ORDER_PATTERN.search(description) is not None
+
+
+def _split_lifestyle_transactions(expenses: list) -> tuple[list, list]:
+    """(lifestyle, individual) — lifestyle holds whatever classifies into
+    LIFESTYLE_CATEGORIES and doesn't look like a standing order; everything
+    else (including standing-order-looking lifestyle-category transactions)
+    stays in `individual` for the normal per-vendor rules."""
+    lifestyle, individual = [], []
+    for t in expenses:
+        if not _looks_like_standing_order(t.description) and classify(t.description) in LIFESTYLE_CATEGORIES:
+            lifestyle.append(t)
+        else:
+            individual.append(t)
+    return lifestyle, individual
+
+
+def _lifestyle_pool_lines(lifestyle_txs: list, account: Account) -> list[StagedLine]:
+    if not lifestyle_txs:
+        return []
+    labels_by_key = {v.key: v.label for v in vendor_options(lifestyle_txs)}
+
+    by_category: dict[str, list] = {}
+    for t in lifestyle_txs:
+        by_category.setdefault(classify(t.description), []).append(t)
+
+    lines = []
+    for category_name, txs in by_category.items():
+        aggregate = aggregate_spend(txs, Frequency.MONTHLY)
+        vendor_keys = sorted({merchant_key(t) for t in txs})
+        labels = [labels_by_key.get(k, k) for k in vendor_keys]
+        vendor_label = ", ".join(labels[:4]) + (f" +{len(labels) - 4} more" if len(labels) > 4 else "")
+        lines.append(
+            StagedLine(
+                description=f"{category_name} (pooled)",
+                amount=round(abs(aggregate.average_per_period), 2),
+                flow_type=FlowType.EXPENSE,
+                frequency=Frequency.MONTHLY,
+                account_id=account.id,
+                category_name=category_name,
+                vendor_keys=vendor_keys,
+                vendor_label=vendor_label,
+                effective_from=dt.date.today(),
+                window_start=aggregate.start_date,
+                window_end=aggregate.end_date,
+                rationale=(
+                    f"Pooled {len(vendor_keys)} small/varied {category_name} vendor(s) on {account.name} "
+                    f"({len(txs)} transaction(s) totalling £{-aggregate.total:,.2f}) into one line "
+                    "instead of one per vendor."
+                ),
+            )
+        )
+    return lines
 
 
 def _recurring_vendor_lines(expenses: list, account: Account) -> list[StagedLine]:
@@ -172,11 +250,14 @@ def recommend_budget(
         if not expenses:
             continue
 
-        vendor_lines = _recurring_vendor_lines(expenses, account)
+        lifestyle_txs, individual_txs = _split_lifestyle_transactions(expenses)
+        recommendations += _lifestyle_pool_lines(lifestyle_txs, account)
+
+        vendor_lines = _recurring_vendor_lines(individual_txs, account)
         recommendations += vendor_lines
 
         covered_keys = {line.vendor_keys[0] for line in vendor_lines}
-        remaining = [t for t in expenses if merchant_key(t) not in covered_keys]
+        remaining = [t for t in individual_txs if merchant_key(t) not in covered_keys]
         recommendations += _category_catchall_lines(
             session, remaining, account, start, end, min_monthly_amount
         )

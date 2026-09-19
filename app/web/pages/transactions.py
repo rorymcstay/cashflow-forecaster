@@ -146,14 +146,14 @@ def transactions_page():
                     account_options, label="Accounts", multiple=True, value=list(account_options.keys())
                 )
                 .classes("min-w-[190px]")
-                .props("use-chips")
+                .props("use-chips clearable")
             )
             category_select = (
                 ui.select(
                     category_options, label="Categories", multiple=True, value=list(category_options.keys())
                 )
                 .classes("min-w-[190px]")
-                .props("use-chips")
+                .props("use-chips clearable")
             )
             group_select = ui.select(list(GROUP_FIELDS), label="Group by", value="None")
             search_input = ui.input("Search").props("debounce=300 clearable")
