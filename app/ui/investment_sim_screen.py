@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy.orm import Session
 
-from app import investment_sim, market_data
+from app import investment_sim, investments, market_data
 from app.investment_sim import grid_values as _grid_values
 from app.models import Account
 from app.ui import theme
@@ -278,7 +278,7 @@ class InvestmentSimScreen(QWidget):
         return self.session.get(Account, account_id)
 
     def _historical_returns(self, account: Account, as_of: dt.date) -> list[float] | None:
-        weights = account.portfolio_weights
+        weights = investments.portfolio_weights(account)
         returns = market_data.fetch_portfolio_monthly_returns(
             weights, as_of, self.lookback_spin.value(), force_refresh=self.force_refresh_check.isChecked()
         )
@@ -308,9 +308,12 @@ class InvestmentSimScreen(QWidget):
             return
 
         n_periods = self.horizon_spin.value() * 12
+        # cash_position isn't invested, so it carries no market risk — simulate from the
+        # holdings' own value only.
+        principal = account.current_balance - account.cash_position
         paths = investment_sim.bootstrap_paths(
             returns,
-            account.current_balance,
+            principal,
             n_periods,
             n_paths=2000,
             monthly_contribution=self.contribution_spin.value(),
@@ -353,6 +356,7 @@ class InvestmentSimScreen(QWidget):
         if returns is None:
             return
 
+        principal = account.current_balance - account.cash_position
         if self.grid_mode_combo.currentData() == "return_vol":
             return_shifts = [
                 v / 100 for v in _grid_values(self.rs_min.value(), self.rs_max.value(), self.rs_step.value())
@@ -360,7 +364,7 @@ class InvestmentSimScreen(QWidget):
             vol_scales = _grid_values(self.vs_min.value(), self.vs_max.value(), self.vs_step.value())
             grid = investment_sim.return_vol_grid(
                 returns,
-                account.current_balance,
+                principal,
                 self.horizon_spin.value() * 12,
                 return_shifts,
                 vol_scales,
@@ -382,9 +386,7 @@ class InvestmentSimScreen(QWidget):
                     self.horizon_min.value(), self.horizon_max.value(), self.horizon_step.value()
                 )
             ]
-            grid = investment_sim.contribution_horizon_grid(
-                returns, account.current_balance, contributions, horizons
-            )
+            grid = investment_sim.contribution_horizon_grid(returns, principal, contributions, horizons)
             row_values, col_values = contributions, horizons
             row_label_fmt = lambda v: f"£{v:,.0f}/mo"
             col_label_fmt = lambda v: f"{v} yrs"

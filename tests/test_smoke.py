@@ -7,6 +7,7 @@ MODULES = [
     "app.db",
     "app.forecast",
     "app.investment_sim",
+    "app.investments",
     "app.main",
     "app.market_data",
     "app.mcp_server",

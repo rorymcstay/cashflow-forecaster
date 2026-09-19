@@ -1,5 +1,6 @@
 import csv
 import datetime as dt
+from typing import ClassVar
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QScatterSeries, QValueAxis
 from PySide6.QtCore import QDate, QDateTime, QPointF, Qt, QTime
@@ -13,15 +14,18 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QTableWidgetSelectionRange,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 from sqlalchemy.orm import Session
 
+from app import investments
 from app.forecast import (
     account_daily_forecast,
     bucket_date_ranges,
@@ -65,8 +69,19 @@ class CashflowForecastScreen(QWidget):
         self._chart_balances: list[float] = []
         self._split_mode_active = False
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<h2>Cash Flow Forecast</h2>"))
+        outer_layout = QVBoxLayout(self)
+        outer_layout.addWidget(QLabel("<h2>Cash Flow Forecast</h2>"))
+
+        self.tabs = QTabWidget()
+        outer_layout.addWidget(self.tabs)
+
+        cashflow_tab = QWidget()
+        layout = QVBoxLayout(cashflow_tab)
+        self.tabs.addTab(cashflow_tab, "Cashflow")
+
+        self.investments_tab = InvestmentsTab(self.session)
+        self.tabs.addTab(self.investments_tab, "Investments")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         today = QDate.currentDate()
         month_start = QDate(today.year(), today.month(), 1)
@@ -315,6 +330,11 @@ class CashflowForecastScreen(QWidget):
         accounts = self.session.query(Account).order_by(Account.name).all()
         self.account_select.set_accounts(accounts)
         self._update_split_check_enabled()
+        self.investments_tab.refresh()
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is self.investments_tab:
+            self.investments_tab.refresh()
 
     def _selected_accounts(self) -> list[Account]:
         """Accounts to forecast for, honoring the multi-select."""
@@ -454,3 +474,132 @@ class CashflowForecastScreen(QWidget):
             self.warnings_label.setText("\n".join(lines))
         else:
             self.warnings_label.setText("")
+
+
+class InvestmentsTab(QWidget):
+    """Read-only view of every investment account's holdings, priced live:
+    quantity, cost basis (if an average_price was ever recorded), current
+    market value, and unrealized gain/loss — the actual "did this make
+    money" report, as opposed to the Cashflow tab's forward-looking
+    market-return projection."""
+
+    COLUMNS: ClassVar[list[str]] = [
+        "Account",
+        "Ticker",
+        "Quantity",
+        "Avg Price",
+        "Current Price",
+        "Cost Basis",
+        "Market Value",
+        "Unrealized G/L",
+        "G/L %",
+    ]
+
+    def __init__(self, session: Session, parent=None):
+        super().__init__(parent)
+        self.session = session
+
+        layout = QVBoxLayout(self)
+
+        top_row = QHBoxLayout()
+        sync_btn = QPushButton("Sync Investment Prices")
+        sync_btn.clicked.connect(self._sync_and_refresh)
+        top_row.addWidget(sync_btn)
+        top_row.addStretch()
+        layout.addLayout(top_row)
+
+        self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        layout.addWidget(self.summary_label)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table)
+
+        self.placeholder_label = QLabel(
+            "No investment accounts yet — add holdings to an account on the Accounts tab."
+        )
+        self.placeholder_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        layout.addWidget(self.placeholder_label)
+
+        self.refresh()
+
+    def _money_item(self, value: float | None) -> QTableWidgetItem:
+        item = QTableWidgetItem(f"£{value:,.2f}" if value is not None else "—")
+        item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return item
+
+    def _sync_and_refresh(self) -> None:
+        accounts = [a for a in self.session.query(Account).all() if a.holdings]
+        if not accounts:
+            QMessageBox.information(self, "No investment accounts", "No account has holdings to sync yet.")
+            return
+        failed = [a.name for a in accounts if investments.refresh_investment_value(self.session, a) is None]
+        self.refresh()
+        if failed:
+            QMessageBox.warning(
+                self,
+                "Some prices unavailable",
+                f"Synced {len(accounts) - len(failed)} of {len(accounts)}. Couldn't fetch prices "
+                f"for: {', '.join(failed)}.",
+            )
+
+    def refresh(self) -> None:
+        self.table.setRowCount(0)
+        accounts = [a for a in self.session.query(Account).order_by(Account.name).all() if a.share_quantities]
+        self.placeholder_label.setVisible(not accounts)
+        self.table.setVisible(bool(accounts))
+
+        total_cash = sum(a.cash_position for a in accounts)
+        total_balance = sum(a.current_balance for a in accounts)
+        total_cost_basis = 0.0
+        total_gain = 0.0
+        any_cost_basis = False
+
+        for account in accounts:
+            for h in investments.holdings_detail(account):
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self.table.setItem(row, 0, QTableWidgetItem(account.name))
+                self.table.setItem(row, 1, QTableWidgetItem(h["ticker"]))
+                self.table.setItem(row, 2, QTableWidgetItem(f"{h['quantity']:g}"))
+                self.table.setItem(row, 3, self._money_item(h["average_price"]))
+                self.table.setItem(row, 4, self._money_item(h["price"]))
+                self.table.setItem(row, 5, self._money_item(h["cost_basis"]))
+                self.table.setItem(row, 6, self._money_item(h["value"]))
+                gain_item = self._money_item(h["unrealized_gain"])
+                if h["unrealized_gain"] is not None:
+                    gain_item.setForeground(
+                        QColor(theme.SUCCESS if h["unrealized_gain"] >= 0 else theme.WARNING)
+                    )
+                self.table.setItem(row, 7, gain_item)
+                pct_text = (
+                    f"{h['unrealized_gain_pct'] * 100:+.1f}%" if h["unrealized_gain_pct"] is not None else "—"
+                )
+                pct_item = QTableWidgetItem(pct_text)
+                pct_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row, 8, pct_item)
+
+                if h["cost_basis"] is not None:
+                    total_cost_basis += h["cost_basis"]
+                    any_cost_basis = True
+                if h["unrealized_gain"] is not None:
+                    total_gain += h["unrealized_gain"]
+
+        for col in range(len(self.COLUMNS) - 1):
+            self.table.resizeColumnToContents(col)
+
+        lines = [f"Cash: £{total_cash:,.2f}    Total balance: £{total_balance:,.2f}"]
+        if any_cost_basis:
+            gain_pct = f" ({total_gain / total_cost_basis * 100:+.1f}%)" if total_cost_basis else ""
+            lines.append(
+                f"Unrealized gain/loss (priced holdings with an avg price set): £{total_gain:,.2f}{gain_pct}"
+            )
+        else:
+            lines.append("Set an avg price on a holding (Accounts tab) to see unrealized gain/loss here.")
+        self.summary_label.setText("\n".join(lines))

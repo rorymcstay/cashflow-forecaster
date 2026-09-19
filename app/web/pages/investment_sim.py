@@ -3,7 +3,7 @@ import datetime as dt
 import plotly.graph_objects as go
 from nicegui import ui
 
-from app import investment_sim, market_data
+from app import investment_sim, investments, market_data
 from app.investment_sim import grid_values
 from app.models import Account
 from app.web.layout import ACCENT, TEXT_MUTED, get_page_session, page_shell
@@ -92,7 +92,7 @@ def investment_sim_page():
 
         def historical_returns(account: Account, as_of: dt.date) -> list[float] | None:
             returns = market_data.fetch_portfolio_monthly_returns(
-                account.portfolio_weights,
+                investments.portfolio_weights(account),
                 as_of,
                 int(lookback_input.value),
                 force_refresh=force_refresh_check.value,
@@ -117,9 +117,12 @@ def investment_sim_page():
                 return
 
             n_periods = int(horizon_input.value) * 12
+            # cash_position isn't invested, so it carries no market risk — simulate from the
+            # holdings' own value only.
+            principal = account.current_balance - account.cash_position
             paths = investment_sim.bootstrap_paths(
                 returns,
-                account.current_balance,
+                principal,
                 n_periods,
                 n_paths=2000,
                 monthly_contribution=contribution_input.value,
@@ -216,12 +219,13 @@ def investment_sim_page():
             if returns is None:
                 return
 
+            principal = account.current_balance - account.cash_position
             if grid_mode_select.value == "return_vol":
                 return_shifts = [v / 100 for v in grid_values(rs_min.value, rs_max.value, rs_step.value)]
                 vol_scales = grid_values(vs_min.value, vs_max.value, vs_step.value)
                 grid = investment_sim.return_vol_grid(
                     returns,
-                    account.current_balance,
+                    principal,
                     int(horizon_input.value) * 12,
                     return_shifts,
                     vol_scales,
@@ -240,9 +244,7 @@ def investment_sim_page():
                 horizons = [
                     int(v) for v in grid_values(horizon_min.value, horizon_max.value, horizon_step.value)
                 ]
-                grid = investment_sim.contribution_horizon_grid(
-                    returns, account.current_balance, contributions, horizons
-                )
+                grid = investment_sim.contribution_horizon_grid(returns, principal, contributions, horizons)
                 populate_grid(
                     grid,
                     contributions,

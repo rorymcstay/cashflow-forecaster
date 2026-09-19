@@ -46,6 +46,13 @@ class Account(Base):
     current_balance: Mapped[float] = mapped_column(Float, default=0.0)
     balance_as_of: Mapped[dt.date] = mapped_column(Date, default=dt.date.today)
     low_balance_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Un-invested cash sitting in an investment account, tracked separately
+    # from its holdings. For an account with any holdings, current_balance is
+    # no longer a free-standing figure — it's kept in sync (see
+    # app/investments.py:refresh_investment_value) with
+    # cash_position + the live market value of those holdings. Meaningless
+    # (always 0) for a plain account with no holdings.
+    cash_position: Mapped[float] = mapped_column(Float, default=0.0)
     # Annual rate as a percentage (e.g. 4.5 for 4.5% APY), compounded monthly
     # in the cashflow forecast for any account that has one set — independent
     # of how the account is otherwise used.
@@ -77,23 +84,30 @@ class Account(Base):
         return self.name
 
     @property
-    def portfolio_weights(self) -> dict[str, float]:
-        """{ticker: weight} for this account's holdings — presence of any
-        holdings marks it an investment account, driving both the historical
-        Monte Carlo simulation and (via the mean historical return) the
-        deterministic cashflow forecast."""
-        return {h.ticker: h.weight for h in self.holdings}
+    def share_quantities(self) -> dict[str, float]:
+        """{ticker: number of shares held} — presence of any holdings marks
+        this an investment account, driving both the historical Monte Carlo
+        simulation and (via the mean historical return) the deterministic
+        cashflow forecast. This is the stored, price-independent quantity;
+        for relative portfolio weights (which need a live price per ticker)
+        see app/investments.py:portfolio_weights."""
+        return {h.ticker: h.quantity for h in self.holdings}
 
 
 class Holding(Base):
-    """A ticker + relative weight within an investment account's portfolio."""
+    """A ticker + number of shares held within an investment account."""
 
     __tablename__ = "holdings"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
     ticker: Mapped[str] = mapped_column(String(20))
-    weight: Mapped[float] = mapped_column(Float)
+    quantity: Mapped[float] = mapped_column(Float)
+    # Cost basis per share (what you actually paid, on average) — optional,
+    # since it's not something a live price feed can tell you. Lets
+    # app/investments.py:holdings_detail report real unrealized gain/loss
+    # against the live price, not just the market's historical return.
+    average_price: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     account: Mapped["Account"] = relationship(back_populates="holdings")
 

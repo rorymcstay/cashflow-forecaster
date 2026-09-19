@@ -17,12 +17,21 @@ statements.
 """
 
 import datetime as dt
+import logging
 import re
 import subprocess
 import tempfile
 from pathlib import Path
 
 import pdfplumber
+
+# Trading 212's embedded font (see the Trading 212 section below) has a
+# descriptor pdfminer can't parse a FontBBox out of — harmless since we only
+# ever use this font's rendered glyphs (for OCR), never its bbox metrics,
+# but pdfminer logs a warning on every character for every page opened, which
+# is enough to swamp real output. Quieten just that logger, not warnings in
+# general.
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 MONTHS = {
     m: i + 1

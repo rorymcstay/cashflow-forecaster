@@ -44,6 +44,7 @@ class CrudScreen(QWidget):
         self.on_change = on_change
 
         layout = QVBoxLayout(self)
+        self.main_layout = layout  # exposed so subclasses can append their own rows
         layout.addWidget(QLabel(f"<h2>{title}</h2>"))
 
         toolbar = QHBoxLayout()

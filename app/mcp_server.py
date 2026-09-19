@@ -3,7 +3,7 @@ import datetime as dt
 
 from mcp.server.mcpserver import MCPServer
 
-from app import investment_sim, market_data
+from app import investment_sim, investments, market_data
 from app.analytics import expense_vs_forecast as _expense_vs_forecast
 from app.budget_recommender import recommend_budget as _recommend_budget_core
 from app.vendor_group_recommender import recommend_vendor_groups as _recommend_vendor_groups
@@ -75,9 +75,11 @@ server = MCPServer(
         "cashflow forecasts). Money amounts on committed budget items and upcoming "
         "expenses are always positive; direction (income vs expense) is a separate field. "
         "Imported transactions and statements keep their own signed `amount` (+ in / - out). "
-        "Any account can hold investment tickers+weights (set_holdings) — this drives both "
-        "the deterministic cashflow forecast and run_investment_simulation's historical-"
-        "bootstrap Monte Carlo."
+        "Any account can hold investment tickers+share quantities (set_holdings) plus a separate "
+        "cash_position — this drives both the deterministic cashflow forecast and "
+        "run_investment_simulation's historical-bootstrap Monte Carlo. Once an account has holdings, "
+        "its current_balance is derived (cash_position + live market value) rather than directly "
+        "editable — see sync_investment_value."
     ),
 )
 
@@ -104,7 +106,8 @@ def _account_to_dict(a: Account) -> dict:
         "balance_as_of": a.balance_as_of.isoformat(),
         "low_balance_threshold": a.low_balance_threshold,
         "growth_rate": a.growth_rate,
-        "holdings": {h.ticker: h.weight for h in a.holdings},
+        "cash_position": a.cash_position,
+        "holdings": {h.ticker: h.quantity for h in a.holdings},
         "is_credit_card": a.is_credit_card,
         "cc_payee_account": a.cc_payee_account.name if a.cc_payee_account else None,
         "cc_payment_day": a.cc_payment_day,
@@ -343,12 +346,14 @@ def read_holdings_statement(file_path: str) -> dict:
         catch an OCR/parsing mistake before you act on it — check reconciliation.ok
         before importing
 
-    This only reads the file. To apply it: set_holdings(account, weights) using each
-    holding's `value` as its weight (falling back to the instrument name as the key
-    for any holding with ticker=None — set_holdings doesn't require real tickers, but
-    the forecast/simulation tools can only price a weight they recognise as a ticker),
-    and update_account(account, current_balance=holdings_value, balance_as_of=as_of)
-    to sync the account's balance to this snapshot.
+    This only reads the file. To apply it: set_holdings(account, quantities) using each
+    holding's `quantity` directly (falling back to the instrument name as the key for any
+    holding with ticker=None — set_holdings doesn't require real tickers, but the
+    forecast/simulation tools can only price a holding they recognise as a ticker) — this
+    re-prices the account from live data automatically. The document doesn't report cash, so
+    cash_position is untouched; if you'd rather trust this snapshot's own reconciled total
+    exactly (e.g. prices moved between when it was generated and now), set current_balance
+    directly instead — but only once holdings are cleared, since it's derived once any exist.
     """
     return _parse_holdings_statement(file_path)
 
@@ -614,6 +619,7 @@ def list_accounts() -> list[dict]:
 def create_account(
     name: str,
     current_balance: float = 0.0,
+    cash_position: float = 0.0,
     balance_as_of: str | None = None,
     low_balance_threshold: float | None = None,
     growth_rate: float | None = None,
@@ -627,6 +633,13 @@ def create_account(
 
     growth_rate is an annual percentage (e.g. 4.5 for 4.5% APY), compounded
     monthly in the cashflow forecast for this account.
+
+    cash_position is un-invested cash held within this account, tracked
+    separately from any holdings you add later with set_holdings — once
+    holdings exist, current_balance stops being directly settable and
+    instead tracks cash_position + the live market value of those holdings
+    (see sync_investment_value). Until then, current_balance behaves as an
+    ordinary manually-set balance.
 
     is_credit_card=True enables autopay projection: on cc_payment_day each
     month (1-31, clamped to shorter months), a direct debit is projected
@@ -644,6 +657,7 @@ def create_account(
         account = Account(
             name=name,
             current_balance=current_balance,
+            cash_position=cash_position,
             balance_as_of=_parse_date(balance_as_of) or dt.date.today(),
             low_balance_threshold=low_balance_threshold,
             growth_rate=growth_rate,
@@ -667,6 +681,7 @@ def update_account(
     account_id: int,
     name: str | None = None,
     current_balance: float | None = None,
+    cash_position: float | None = None,
     balance_as_of: str | None = None,
     low_balance_threshold: float | None = None,
     clear_threshold: bool = False,
@@ -683,6 +698,12 @@ def update_account(
     """Update an account. Only pass the fields you want to change; set clear_threshold=True to remove a
     warning threshold, clear_growth_rate=True to remove a growth rate.
 
+    current_balance is rejected once the account has any holdings (set via
+    set_holdings) — at that point it's derived from cash_position + the live
+    market value of those holdings instead of being directly settable; pass
+    cash_position and/or call sync_investment_value to move it. For an
+    account with no holdings, current_balance still works exactly as before.
+
     Credit card autopay fields (cc_payee_account, cc_payment_day,
     cc_pay_in_full, cc_fixed_payment_amount) only take effect once
     is_credit_card is (or was already) True.
@@ -695,7 +716,17 @@ def update_account(
         if name is not None:
             account.name = name
         if current_balance is not None:
+            if account.holdings:
+                raise ValueError(
+                    f"'{account.name}' has holdings, so current_balance is derived (cash_position + "
+                    "live market value) rather than directly settable — pass cash_position instead, "
+                    "or call sync_investment_value to refresh it from current prices."
+                )
             account.current_balance = current_balance
+        if cash_position is not None:
+            account.cash_position = cash_position
+            if account.holdings:
+                investments.refresh_investment_value(session, account)
         if balance_as_of is not None:
             account.balance_as_of = _parse_date(balance_as_of)
         if clear_threshold:
@@ -764,32 +795,96 @@ def delete_account(account_id: int) -> dict:
 
 @server.tool()
 def list_holdings(account: str) -> dict[str, float]:
-    """{ticker: weight} for an account's investment holdings (empty dict if it's not an
-    investment account)."""
+    """{ticker: number of shares held} for an account's investment holdings (empty dict if
+    it's not an investment account). For cost basis and unrealized gain/loss too, use
+    list_holdings_detail instead."""
     session = get_session()
     try:
         acc = _resolve_account(session, account)
-        return {h.ticker: h.weight for h in acc.holdings}
+        return {h.ticker: h.quantity for h in acc.holdings}
     finally:
         session.close()
 
 
 @server.tool()
-def set_holdings(account: str, weights: dict[str, float]) -> dict:
-    """Replace an account's investment holdings with `weights` ({ticker: relative weight} —
-    needn't sum to 1, they're renormalised). Pass an empty dict to clear holdings (making it a
-    plain account again). Having any holdings is what makes an account an "investment account":
-    it drives both the deterministic cashflow forecast's growth (mean historical monthly return
-    of the portfolio) and run_investment_simulation.
+def list_holdings_detail(account: str) -> list[dict]:
+    """Per-holding breakdown for an investment account against live prices: [{ticker, quantity,
+    average_price, price, cost_basis, value, unrealized_gain, unrealized_gain_pct}].
+    average_price (your cost basis per share) is only set if you passed it to set_holdings —
+    None otherwise, in which case cost_basis/unrealized_gain/unrealized_gain_pct are also None
+    (there's nothing to compare the live price against). price/value are None for a ticker whose
+    live price couldn't be fetched."""
+    session = get_session()
+    try:
+        acc = _resolve_account(session, account)
+        return investments.holdings_detail(acc)
+    finally:
+        session.close()
+
+
+@server.tool()
+def set_holdings(
+    account: str, quantities: dict[str, float], average_prices: dict[str, float] | None = None
+) -> dict:
+    """Replace an account's investment holdings with `quantities` ({ticker: number of shares
+    held}). Pass an empty dict to clear holdings (making it a plain account again, with
+    current_balance directly settable again via update_account). Having any holdings is what
+    makes an account an "investment account": it drives both the deterministic cashflow
+    forecast's growth (mean historical monthly return of the resulting portfolio mix) and
+    run_investment_simulation.
+
+    `average_prices` ({ticker: cost basis per share}, optional) records what you actually paid —
+    purely for reporting unrealized gain/loss (see list_holdings_detail), it has no effect on the
+    forecast/simulation math. Any ticker in `quantities` but not `average_prices` keeps whatever
+    average_price it already had (matched by ticker) if you're replacing an existing holding,
+    else gets None.
+
+    Immediately re-prices the account: current_balance is set to
+    cash_position + the live market value of these holdings (see sync_investment_value), unless
+    a price can't be fetched for anything held, in which case current_balance is left as-is —
+    call sync_investment_value later once prices are available.
     """
     session = get_session()
     try:
         acc = _resolve_account(session, account)
+        existing_avg_prices = {h.ticker: h.average_price for h in acc.holdings}
         acc.holdings.clear()  # cascade="all, delete-orphan" — also updates the in-memory collection
-        for ticker, weight in weights.items():
-            session.add(Holding(account=acc, ticker=ticker.upper(), weight=weight))
+        for ticker, quantity in quantities.items():
+            ticker = ticker.upper()
+            avg_price = (average_prices or {}).get(ticker, existing_avg_prices.get(ticker))
+            session.add(Holding(account=acc, ticker=ticker, quantity=quantity, average_price=avg_price))
         session.commit()
+        investments.refresh_investment_value(session, acc)
         return _account_to_dict(acc)
+    finally:
+        session.close()
+
+
+@server.tool()
+def sync_investment_value(account: str) -> dict:
+    """Re-fetch live prices for an investment account's holdings and refresh current_balance
+    (cash_position + market value) and balance_as_of from them. Prices drift daily even with no
+    holdings/cash_position edits, so call this periodically to keep the account current. Returns
+    the updated account plus a per-holding breakdown (ticker, quantity, average_price, price,
+    cost_basis, value, unrealized_gain, unrealized_gain_pct — see list_holdings_detail); raises
+    if no price could be fetched for anything held (e.g. no network)."""
+    session = get_session()
+    try:
+        acc = _resolve_account(session, account)
+        if not acc.holdings:
+            raise ValueError(f"'{acc.name}' has no holdings. Set some first with set_holdings.")
+        prices = market_data.fetch_latest_prices(list(acc.share_quantities))
+        detail = investments.holdings_detail(acc, prices=prices)
+        new_balance = investments.refresh_investment_value(session, acc, prices=prices)
+        if new_balance is None:
+            raise ValueError(
+                f"Couldn't fetch a price for any of '{acc.name}'s holdings (bad ticker or no network) "
+                "— current_balance left unchanged."
+            )
+        return {
+            "account": _account_to_dict(acc),
+            "holdings": detail,
+        }
     finally:
         session.close()
 
@@ -824,11 +919,15 @@ def run_investment_simulation(
       - return_shift_grid × vol_scale_grid: "what if returns/volatility were different from
         history?" (e.g. return_shift_grid=[-0.02,0,0.02], vol_scale_grid=[0.5,1.0,1.5])
       - contribution_grid × horizon_grid_years: "how much do I need to save, for how long?"
+
+    Simulated from the holdings' own market value (current_balance minus cash_position) — cash_position
+    isn't invested, so it doesn't carry market risk; it's reported separately and left out of the
+    percentile bands/drawdown stats.
     """
     session = get_session()
     try:
         acc = _resolve_account(session, account)
-        weights = {h.ticker: h.weight for h in acc.holdings}
+        weights = investments.portfolio_weights(acc)
         if not weights:
             raise ValueError(f"'{acc.name}' has no holdings. Set some first with set_holdings.")
         as_of_date = _parse_date(as_of) or dt.date.today()
@@ -837,11 +936,12 @@ def run_investment_simulation(
             raise ValueError(
                 "Couldn't fetch historical price data for this portfolio (bad ticker or no network)."
             )
+        principal = acc.current_balance - acc.cash_position
 
         n_periods = horizon_years * 12
         paths = investment_sim.bootstrap_paths(
             returns,
-            acc.current_balance,
+            principal,
             n_periods,
             n_paths=n_paths,
             monthly_contribution=monthly_contribution,
@@ -850,6 +950,7 @@ def run_investment_simulation(
         result = {
             "account": acc.name,
             "as_of": as_of_date.isoformat(),
+            "cash_position": acc.cash_position,
             "lookback_years": lookback_years,
             "horizon_years": horizon_years,
             "historical_monthly_returns_used": len(returns),
@@ -861,7 +962,7 @@ def run_investment_simulation(
         if return_shift_grid and vol_scale_grid:
             grid = investment_sim.return_vol_grid(
                 returns,
-                acc.current_balance,
+                principal,
                 n_periods,
                 return_shift_grid,
                 vol_scale_grid,
@@ -874,7 +975,7 @@ def run_investment_simulation(
 
         if contribution_grid and horizon_grid_years:
             grid = investment_sim.contribution_horizon_grid(
-                returns, acc.current_balance, contribution_grid, horizon_grid_years, seed=seed
+                returns, principal, contribution_grid, horizon_grid_years, seed=seed
             )
             result["contribution_horizon_grid"] = [
                 {"monthly_contribution": c, "horizon_years": y, **stats} for (c, y), stats in grid.items()
@@ -906,11 +1007,14 @@ def run_realised_historical_scenarios(
     month-by-month balance path, not just its ending balance and max_drawdown (each scenario's own
     worst peak-to-trough decline, as a negative fraction — also summarised across all scenarios via
     worst/median/best_max_drawdown, alongside the equivalent ending-balance stats).
+
+    Replayed from the holdings' own market value (current_balance minus cash_position) — cash_position
+    isn't invested, so it's excluded and reported separately.
     """
     session = get_session()
     try:
         acc = _resolve_account(session, account)
-        weights = {h.ticker: h.weight for h in acc.holdings}
+        weights = investments.portfolio_weights(acc)
         if not weights:
             raise ValueError(f"'{acc.name}' has no holdings. Set some first with set_holdings.")
         as_of_date = _parse_date(as_of) or dt.date.today()
@@ -921,9 +1025,10 @@ def run_realised_historical_scenarios(
                 f"Only {len(series)} months of history available, need at least {n_periods} "
                 f"({horizon_years} years) — increase lookback_years or reduce horizon_years."
             )
+        principal = acc.current_balance - acc.cash_position
 
         scenarios = investment_sim.realised_historical_scenarios(
-            series, acc.current_balance, n_periods, monthly_contribution
+            series, principal, n_periods, monthly_contribution
         )
         endings = sorted(s["ending_balance"] for s in scenarios)
         drawdowns = sorted(s["max_drawdown"] for s in scenarios)
@@ -934,6 +1039,7 @@ def run_realised_historical_scenarios(
         return {
             "account": acc.name,
             "as_of": as_of_date.isoformat(),
+            "cash_position": acc.cash_position,
             "horizon_years": horizon_years,
             "scenario_count": len(scenarios),
             "worst_ending_balance": endings[0],

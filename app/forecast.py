@@ -7,7 +7,7 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 from sqlalchemy.orm import Session
 
-from app import market_data
+from app import investments, market_data
 from app.budgets import active_budget_items
 from app.models import Account, BudgetItem, FlowType, Frequency, Statement, Transaction, UpcomingExpense
 
@@ -140,7 +140,7 @@ def monthly_savings_amount(
         if not item.is_active_on(as_of) or item.account_id in excluded:
             continue
         target = item.target_account
-        if target is not None and (target.growth_rate or target.portfolio_weights):
+        if target is not None and (target.growth_rate or target.share_quantities):
             total += item.monthly_equivalent
     return total
 
@@ -150,18 +150,26 @@ def investment_accounts_summary(session: Session, as_of: dt.date | None = None) 
     balance, annualised return, and the resulting estimated monthly growth in
     £ — used by the financial health dashboard. Holdings-based accounts use
     the mean historical monthly return (same source as the cashflow
-    forecast); manual accounts use their fixed growth_rate."""
+    forecast); manual accounts use their fixed growth_rate. For a
+    holdings-based account, monthly_growth_estimate applies only to the
+    shares' market value (balance minus cash_position) — cash_position
+    itself doesn't grow."""
     as_of = as_of or dt.date.today()
     results = []
     for account in session.query(Account).order_by(Account.name).all():
-        if account.portfolio_weights:
-            monthly_rate = market_data.expected_monthly_return(account.portfolio_weights, as_of)
+        if account.share_quantities:
+            weights = investments.portfolio_weights(account)
+            if not weights:
+                continue
+            monthly_rate = market_data.expected_monthly_return(weights, as_of)
             if monthly_rate is None:
                 continue
-            source = "/".join(sorted(account.portfolio_weights))
+            source = "/".join(sorted(weights))
+            growable = account.current_balance - account.cash_position
         elif account.growth_rate:
             monthly_rate = (1 + account.growth_rate / 100) ** (1 / 12) - 1
             source = f"{account.growth_rate:.2f}% APY (manual)"
+            growable = account.current_balance
         else:
             continue
         annual_rate = (1 + monthly_rate) ** 12 - 1
@@ -170,8 +178,9 @@ def investment_accounts_summary(session: Session, as_of: dt.date | None = None) 
                 "account_id": account.id,
                 "account": account.name,
                 "balance": account.current_balance,
+                "cash_position": account.cash_position,
                 "annual_rate": annual_rate,
-                "monthly_growth_estimate": account.current_balance * monthly_rate,
+                "monthly_growth_estimate": growable * monthly_rate,
                 "source": source,
             }
         )
@@ -198,7 +207,9 @@ def _investment_growth_rates(
     future ("theoretical") since those can't be known yet."""
     if not postings:
         return {}, {}
-    weights = account.portfolio_weights
+    weights = investments.portfolio_weights(account)
+    if not weights:
+        return {}, {}
     tickers = "/".join(sorted(weights))
 
     today = dt.date.today()
@@ -237,7 +248,12 @@ def _monthly_growth_events(
     """Growth events for any account with a growth_rate or holdings set,
     compounded monthly (posted on the last day of each month, or compute_end
     for a partial final month) on top of the running balance — principal,
-    contributions and prior growth."""
+    contributions and prior growth. For a holdings-based account,
+    contributions/withdrawals land as un-invested cash and only the shares'
+    own market value compounds — cash sits flat until the holdings
+    themselves are updated (see app/investments.py). A plain growth_rate
+    account (no holdings) has no such split: growth applies to its whole
+    balance, as before."""
     postings: list[dt.date] = []
     month_cursor = compute_start.replace(day=1)
     while month_cursor <= compute_end:
@@ -246,7 +262,8 @@ def _monthly_growth_events(
         postings.append(posting)
         month_cursor += relativedelta(months=1)
 
-    if account.portfolio_weights:
+    has_holdings = bool(account.share_quantities)
+    if has_holdings:
         rates, labels = _investment_growth_rates(account, postings)
     elif account.growth_rate:
         rates, labels = _manual_growth_rates(account, postings)
@@ -258,16 +275,30 @@ def _monthly_growth_events(
         amounts_by_date[occ] += signed
 
     growth_events: list[tuple[dt.date, float, str]] = []
-    running = account.current_balance
     posting_set = set(postings)
     current = compute_start
-    while current <= compute_end:
-        running += amounts_by_date.get(current, 0.0)
-        if current in posting_set and current in rates:
-            growth = running * rates[current]
-            growth_events.append((current, growth, labels[current]))
-            running += growth
-        current += dt.timedelta(days=1)
+
+    if has_holdings:
+        # Contributions/withdrawals (in `events`, summed into the balance by
+        # the caller) land as un-invested cash — not tracked here at all,
+        # since only the shares' own market value compounds.
+        shares_running = account.current_balance - account.cash_position
+        while current <= compute_end:
+            if current in posting_set and current in rates:
+                growth = shares_running * rates[current]
+                growth_events.append((current, growth, labels[current]))
+                shares_running += growth
+            current += dt.timedelta(days=1)
+    else:
+        running = account.current_balance
+        while current <= compute_end:
+            running += amounts_by_date.get(current, 0.0)
+            if current in posting_set and current in rates:
+                growth = running * rates[current]
+                growth_events.append((current, growth, labels[current]))
+                running += growth
+            current += dt.timedelta(days=1)
+
     return growth_events
 
 

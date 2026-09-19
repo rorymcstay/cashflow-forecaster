@@ -2,6 +2,7 @@ import datetime as dt
 
 from nicegui import ui
 
+from app import investments
 from app.forecast import account_daily_forecast, account_run_rate
 from app.models import Account, BudgetItem, Holding, UpcomingExpense
 from app.web.layout import SUCCESS, TEXT_MUTED, WARNING, get_page_session, page_shell
@@ -30,25 +31,39 @@ def _cc_autopay_label(account: Account) -> str:
     return f"{payment} from {account.cc_payee_account.name} on day {account.cc_payment_day}"
 
 
-def _parse_holdings(text: str) -> dict[str, float]:
-    weights: dict[str, float] = {}
+def _parse_holdings(text: str) -> tuple[dict[str, float], dict[str, float]]:
+    """({ticker: quantity}, {ticker: average_price}) from "TICKER:quantity"
+    or "TICKER:quantity@avg_price" (avg_price optional), comma-separated."""
+    quantities: dict[str, float] = {}
+    average_prices: dict[str, float] = {}
     for part in text.split(","):
         part = part.strip()
         if not part or ":" not in part:
             continue
-        ticker, _, weight = part.partition(":")
+        ticker, _, rest = part.partition(":")
         ticker = ticker.strip().upper()
+        quantity_text, _, avg_price_text = rest.partition("@")
         try:
-            w = float(weight.strip())
+            q = float(quantity_text.strip())
         except ValueError:
             continue
-        if ticker and w > 0:
-            weights[ticker] = weights.get(ticker, 0.0) + w
-    return weights
+        if not (ticker and q > 0):
+            continue
+        quantities[ticker] = quantities.get(ticker, 0.0) + q
+        avg_price_text = avg_price_text.strip()
+        if avg_price_text:
+            try:
+                average_prices[ticker] = float(avg_price_text)
+            except ValueError:
+                pass
+    return quantities, average_prices
 
 
 def _format_holdings(account: Account) -> str:
-    return ", ".join(f"{h.ticker}:{h.weight:g}" for h in account.holdings)
+    return ", ".join(
+        f"{h.ticker}:{h.quantity:g}" + (f"@{h.average_price:g}" if h.average_price is not None else "")
+        for h in account.holdings
+    )
 
 
 @ui.page("/accounts")
@@ -56,7 +71,9 @@ def accounts_page():
     session = get_page_session()
 
     with page_shell("/accounts", "Accounts"):
-        ui.button("+ Add Account", on_click=lambda: open_account_dialog())
+        with ui.row().classes("gap-2"):
+            ui.button("+ Add Account", on_click=lambda: open_account_dialog())
+            ui.button("Sync Investment Prices", on_click=lambda: sync_investment_prices()).props("outline")
         list_container = ui.column().classes("w-full gap-2")
 
         def render_list():
@@ -76,6 +93,7 @@ def accounts_page():
                     ui.label(f"{FORECAST_DAYS}-Day Forecast").style("width: 130px;")
                     ui.label("Growth / Autopay").style("flex: 1;")
                     ui.label("Holdings").style("width: 140px;")
+                    ui.label("Cash Position").style("width: 110px;")
                     ui.label("").style("width: 110px;")
 
                 for account in accounts:
@@ -96,6 +114,9 @@ def accounts_page():
                         )
                         ui.label(detail).style(f"flex: 1; color: {TEXT_MUTED};")
                         ui.label(_format_holdings(account) or "—").style("width: 140px;")
+                        ui.label(_money(account.cash_position) if account.holdings else "—").style(
+                            "width: 110px;"
+                        )
                         with ui.row().classes("gap-1"):
                             ui.button(icon="edit", on_click=lambda a=account: open_account_dialog(a)).props(
                                 "flat dense"
@@ -103,6 +124,22 @@ def accounts_page():
                             ui.button(icon="delete", on_click=lambda a=account: delete_account(a)).props(
                                 "flat dense color=negative"
                             )
+
+        def sync_investment_prices():
+            accounts = [a for a in session.query(Account).all() if a.holdings]
+            if not accounts:
+                ui.notify("No account has holdings to sync yet.", type="warning")
+                return
+            failed = [a.name for a in accounts if investments.refresh_investment_value(session, a) is None]
+            render_list()
+            if failed:
+                ui.notify(
+                    f"Synced {len(accounts) - len(failed)} of {len(accounts)}. Couldn't fetch prices "
+                    f"for: {', '.join(failed)}.",
+                    type="warning",
+                )
+            else:
+                ui.notify(f"Refreshed {len(accounts)} investment account(s).", type="positive")
 
         def delete_account(account: Account):
             used_budget = session.query(BudgetItem).filter_by(account_id=account.id).count()
@@ -135,8 +172,18 @@ def accounts_page():
             with ui.dialog() as dialog, ui.card().classes("gap-2 w-full max-w-[420px]"):
                 ui.label("Edit Account" if account else "Add Account").classes("text-lg font-bold")
                 name_input = ui.input("Name", value=account.name if account else "")
+                has_holdings = bool(account and account.holdings)
                 balance_input = ui.number(
                     "Current Balance", value=account.current_balance if account else 0.0, format="%.2f"
+                )
+                if has_holdings:
+                    balance_input.disable()
+                    balance_input.tooltip(
+                        "Derived from Cash Position + holdings' live market value — edit those "
+                        "instead, or Cash Position alone if you're not changing holdings here."
+                    )
+                cash_input = ui.number(
+                    "Cash Position", value=account.cash_position if account else 0.0, format="%.2f"
                 )
                 as_of_input = ui.input(
                     "Balance As Of", value=(account.balance_as_of if account else dt.date.today()).isoformat()
@@ -164,7 +211,7 @@ def accounts_page():
                 ).bind_visibility_from(growth_check, "value")
 
                 holdings_input = ui.input(
-                    "Holdings (TICKER:weight, TICKER:weight)",
+                    "Holdings (TICKER:quantity or TICKER:quantity@avg_price, comma-separated)",
                     value=_format_holdings(account) if account else "",
                 )
 
@@ -216,7 +263,7 @@ def accounts_page():
                         ui.notify("Choose a payee account for this credit card.", type="negative")
                         return
 
-                    holdings = _parse_holdings(holdings_input.value)
+                    holdings, holding_average_prices = _parse_holdings(holdings_input.value)
                     threshold = threshold_input.value if threshold_check.value else None
                     growth_rate = growth_input.value if growth_check.value else None
                     cc_payment_day = int(cc_day_input.value) if is_cc else None
@@ -229,7 +276,11 @@ def accounts_page():
                         session.add(obj)
 
                     obj.name = name
-                    obj.current_balance = balance_input.value
+                    # current_balance is derived once holdings exist (see below) — only
+                    # take the input's value directly when there won't be any.
+                    if not holdings:
+                        obj.current_balance = balance_input.value
+                    obj.cash_position = cash_input.value
                     obj.balance_as_of = dt.date.fromisoformat(as_of_input.value)
                     obj.low_balance_threshold = threshold
                     obj.growth_rate = growth_rate
@@ -239,12 +290,31 @@ def accounts_page():
                     obj.cc_pay_in_full = cc_pay_in_full
                     obj.cc_fixed_payment_amount = cc_fixed_payment_amount
 
-                    for h in list(obj.holdings):
-                        session.delete(h)
-                    for ticker, weight in holdings.items():
-                        session.add(Holding(account=obj, ticker=ticker, weight=weight))
+                    # .clear() (not session.delete() per-item) — with expire_on_commit=False, a
+                    # bare session.delete() never drops the row from this in-memory collection, so
+                    # it'd keep showing "deleted" holdings next time the dialog opens, and
+                    # re-saving would sum them back into the count via _parse_holdings, silently
+                    # doubling quantities each edit.
+                    obj.holdings.clear()
+                    for ticker, quantity in holdings.items():
+                        session.add(
+                            Holding(
+                                account=obj,
+                                ticker=ticker,
+                                quantity=quantity,
+                                average_price=holding_average_prices.get(ticker),
+                            )
+                        )
 
                     session.commit()
+
+                    if holdings and investments.refresh_investment_value(session, obj) is None:
+                        ui.notify(
+                            "Saved, but couldn't fetch live prices to compute the balance from "
+                            "holdings + cash — current_balance is unchanged for now.",
+                            type="warning",
+                        )
+
                     dialog.close()
                     render_list()
 

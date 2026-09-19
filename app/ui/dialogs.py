@@ -70,6 +70,14 @@ class AccountDialog(QDialog):
 
         self.name_edit = QLineEdit(obj.name if obj else "")
         self.balance_spin = _amount_spinbox(obj.current_balance if obj else 0.0)
+        self.has_holdings = bool(obj and obj.holdings)
+        if self.has_holdings:
+            self.balance_spin.setEnabled(False)
+            self.balance_spin.setToolTip(
+                "Derived from Cash Position + holdings' live market value — edit those instead, "
+                "or Cash Position alone if you're not changing tickers/quantities here."
+            )
+        self.cash_spin = _amount_spinbox(obj.cash_position if obj else 0.0)
         self.as_of_edit = QDateEdit(_to_qdate(obj.balance_as_of if obj else dt.date.today()))
         self.as_of_edit.setCalendarPopup(True)
 
@@ -168,16 +176,16 @@ class AccountDialog(QDialog):
             transfers_buttons.addWidget(remove_transfer_btn)
             transfers_buttons.addStretch()
 
-        self.holdings_table = QTableWidget(0, 2)
-        self.holdings_table.setHorizontalHeaderLabels(["Ticker", "Weight"])
+        self.holdings_table = QTableWidget(0, 3)
+        self.holdings_table.setHorizontalHeaderLabels(["Ticker", "Quantity", "Avg Price (optional)"])
         self.holdings_table.horizontalHeader().setStretchLastSection(True)
         self.holdings_table.setMaximumHeight(120)
         if obj:
             for h in obj.holdings:
-                self._add_holding_row(h.ticker, h.weight)
+                self._add_holding_row(h.ticker, h.quantity, h.average_price)
 
         add_holding_btn = QPushButton("+ Add Ticker")
-        add_holding_btn.clicked.connect(lambda: self._add_holding_row("", 1.0))
+        add_holding_btn.clicked.connect(lambda: self._add_holding_row("", 1.0, None))
         remove_holding_btn = QPushButton("Remove Selected")
         remove_holding_btn.clicked.connect(self._remove_selected_holding)
         holdings_buttons = QHBoxLayout()
@@ -188,6 +196,7 @@ class AccountDialog(QDialog):
         form = QFormLayout()
         form.addRow("Name", self.name_edit)
         form.addRow("Current Balance", self.balance_spin)
+        form.addRow("Cash Position", self.cash_spin)
         form.addRow("Balance As Of", self.as_of_edit)
         form.addRow(self.threshold_check, self.threshold_spin)
         form.addRow(self.growth_check, self.growth_spin)
@@ -200,7 +209,12 @@ class AccountDialog(QDialog):
             form.addRow(QLabel("Cross-Account Transfers (recurring + one-off, in and out)"))
             form.addRow(self.transfers_table)
             form.addRow(transfers_buttons)
-        form.addRow(QLabel("Investment Holdings (tickers + relative weights; overrides growth above)"))
+        form.addRow(
+            QLabel(
+                "Investment Holdings (ticker + number of shares, optional avg price paid for "
+                "gain/loss reporting; overrides growth above)"
+            )
+        )
         form.addRow(self.holdings_table)
         form.addRow(holdings_buttons)
 
@@ -212,13 +226,16 @@ class AccountDialog(QDialog):
         form.addRow(buttons)
         self.setLayout(form)
 
-    def _add_holding_row(self, ticker: str, weight: float) -> None:
+    def _add_holding_row(self, ticker: str, quantity: float, average_price: float | None) -> None:
         row = self.holdings_table.rowCount()
         self.holdings_table.insertRow(row)
         self.holdings_table.setItem(row, 0, QTableWidgetItem(ticker))
-        weight_item = QTableWidgetItem(f"{weight:g}")
-        weight_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.holdings_table.setItem(row, 1, weight_item)
+        quantity_item = QTableWidgetItem(f"{quantity:g}")
+        quantity_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.holdings_table.setItem(row, 1, quantity_item)
+        avg_price_item = QTableWidgetItem(f"{average_price:g}" if average_price is not None else "")
+        avg_price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.holdings_table.setItem(row, 2, avg_price_item)
 
     def _update_cc_visibility(self, checked: bool) -> None:
         for w in self.cc_row_widgets:
@@ -340,21 +357,31 @@ class AccountDialog(QDialog):
         if row >= 0:
             self.holdings_table.removeRow(row)
 
-    def _collect_holdings(self) -> dict[str, float]:
-        weights: dict[str, float] = {}
+    def _collect_holdings(self) -> tuple[dict[str, float], dict[str, float]]:
+        """({ticker: quantity}, {ticker: average_price}) — the second dict
+        only contains tickers where an average price was actually entered."""
+        quantities: dict[str, float] = {}
+        average_prices: dict[str, float] = {}
         for row in range(self.holdings_table.rowCount()):
             ticker_item = self.holdings_table.item(row, 0)
-            weight_item = self.holdings_table.item(row, 1)
+            quantity_item = self.holdings_table.item(row, 1)
+            avg_price_item = self.holdings_table.item(row, 2)
             ticker = ticker_item.text().strip().upper() if ticker_item else ""
             if not ticker:
                 continue
             try:
-                weight = float(weight_item.text()) if weight_item else 0.0
+                quantity = float(quantity_item.text()) if quantity_item else 0.0
             except ValueError:
-                weight = 0.0
-            if weight > 0:
-                weights[ticker] = weights.get(ticker, 0.0) + weight
-        return weights
+                quantity = 0.0
+            if quantity > 0:
+                quantities[ticker] = quantities.get(ticker, 0.0) + quantity
+                avg_price_text = avg_price_item.text().strip() if avg_price_item else ""
+                if avg_price_text:
+                    try:
+                        average_prices[ticker] = float(avg_price_text)
+                    except ValueError:
+                        pass
+        return quantities, average_prices
 
     def on_accept(self):
         name = self.name_edit.text().strip()
@@ -368,7 +395,7 @@ class AccountDialog(QDialog):
 
         threshold = self.threshold_spin.value() if self.threshold_check.isChecked() else None
         growth_rate = self.growth_spin.value() if self.growth_check.isChecked() else None
-        holdings = self._collect_holdings()
+        holdings, holding_average_prices = self._collect_holdings()
 
         is_credit_card = self.cc_check.isChecked()
         if is_credit_card and self.cc_payee_combo.count() == 0:
@@ -381,10 +408,15 @@ class AccountDialog(QDialog):
             self.cc_fixed_payment_spin.value() if is_credit_card and not cc_pay_in_full else None
         )
 
+        cash_position = self.cash_spin.value()
+
         if self.obj is None:
             self.obj = Account(
                 name=name,
+                # Placeholder when holdings are present — overwritten below by
+                # refresh_investment_value once they're committed.
                 current_balance=self.balance_spin.value(),
+                cash_position=cash_position,
                 balance_as_of=_to_pydate(self.as_of_edit.date()),
                 low_balance_threshold=threshold,
                 growth_rate=growth_rate,
@@ -397,7 +429,11 @@ class AccountDialog(QDialog):
             self.session.add(self.obj)
         else:
             self.obj.name = name
-            self.obj.current_balance = self.balance_spin.value()
+            # current_balance is derived once holdings exist (see below) — only
+            # take the spinbox's value directly when there won't be any.
+            if not holdings:
+                self.obj.current_balance = self.balance_spin.value()
+            self.obj.cash_position = cash_position
             self.obj.balance_as_of = _to_pydate(self.as_of_edit.date())
             self.obj.low_balance_threshold = threshold
             self.obj.growth_rate = growth_rate
@@ -406,13 +442,36 @@ class AccountDialog(QDialog):
             self.obj.cc_payment_day = cc_payment_day
             self.obj.cc_pay_in_full = cc_pay_in_full
             self.obj.cc_fixed_payment_amount = cc_fixed_payment_amount
-            for h in list(self.obj.holdings):
-                self.session.delete(h)
+            # .clear() (not session.delete() per-item) — with expire_on_commit=False, a bare
+            # session.delete() never drops the row from this in-memory collection, so it'd keep
+            # showing "deleted" holdings next time the dialog opens, and re-saving would sum them
+            # back into the count via _collect_holdings, silently doubling quantities each edit.
+            self.obj.holdings.clear()
 
-        for ticker, weight in holdings.items():
-            self.session.add(Holding(account=self.obj, ticker=ticker, weight=weight))
+        for ticker, quantity in holdings.items():
+            self.session.add(
+                Holding(
+                    account=self.obj,
+                    ticker=ticker,
+                    quantity=quantity,
+                    average_price=holding_average_prices.get(ticker),
+                )
+            )
 
         self.session.commit()
+
+        if holdings:
+            from app import investments
+
+            if investments.refresh_investment_value(self.session, self.obj) is None:
+                QMessageBox.warning(
+                    self,
+                    "Prices unavailable",
+                    "Saved, but couldn't fetch live prices to compute the balance from holdings + "
+                    "cash — current_balance is unchanged for now. Try again once you have network "
+                    "access (editing and re-saving the account retries this).",
+                )
+
         self.accept()
 
 

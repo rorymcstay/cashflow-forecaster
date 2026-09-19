@@ -1,8 +1,9 @@
 import datetime as dt
 
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QHBoxLayout, QMessageBox, QPushButton
 from sqlalchemy.orm import Session
 
+from app import investments
 from app.forecast import account_daily_forecast, account_run_rate
 from app.models import Account, BudgetItem, UpcomingExpense
 from app.ui import theme
@@ -38,7 +39,12 @@ COLUMNS = [
     ),
     (
         "Holdings",
-        lambda a: ", ".join(h.ticker for h in a.holdings) if a.holdings else "—",
+        lambda a: ", ".join(f"{h.ticker} x{h.quantity:g}" for h in a.holdings) if a.holdings else "—",
+    ),
+    (
+        "Cash Position",
+        lambda a: f"£{a.cash_position:,.2f}" if a.holdings else "—",
+        lambda a: a.cash_position,
     ),
     (
         "Credit Card Autopay",
@@ -83,6 +89,36 @@ class AccountsScreen(CrudScreen):
         super().__init__(
             session, "Accounts", COLUMNS, query_accounts, AccountDialog, on_change=on_change, parent=parent
         )
+        sync_row = QHBoxLayout()
+        sync_btn = QPushButton("Sync Investment Prices")
+        sync_btn.setToolTip(
+            "Re-fetch live prices for every account with holdings and refresh its balance "
+            "(cash position + market value) from them."
+        )
+        sync_btn.clicked.connect(self._sync_investment_prices)
+        sync_row.addWidget(sync_btn)
+        sync_row.addStretch()
+        self.main_layout.addLayout(sync_row)
+
+    def _sync_investment_prices(self):
+        accounts = [a for a in self.session.query(Account).all() if a.holdings]
+        if not accounts:
+            QMessageBox.information(self, "No investment accounts", "No account has holdings to sync yet.")
+            return
+        failed = []
+        for account in accounts:
+            if investments.refresh_investment_value(self.session, account) is None:
+                failed.append(account.name)
+        self._notify_change()
+        if failed:
+            QMessageBox.warning(
+                self,
+                "Some prices unavailable",
+                f"Synced {len(accounts) - len(failed)} of {len(accounts)} account(s). Couldn't fetch "
+                f"prices for: {', '.join(failed)}.",
+            )
+        else:
+            QMessageBox.information(self, "Synced", f"Refreshed {len(accounts)} investment account(s).")
 
     def delete_item(self):
         obj = self.selected_object()

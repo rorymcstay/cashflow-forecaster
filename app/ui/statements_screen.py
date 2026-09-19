@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy.orm import Session
 
-from app.models import Account, BudgetSuggestion, Statement, SuggestionStatus, Transaction
-from app.pdf_statement_parsers import parse_pdf_statement
+from app.models import Account, BudgetSuggestion, Holding, Statement, SuggestionStatus, Transaction
+from app.pdf_statement_parsers import parse_holdings_statement, parse_pdf_statement
 from app.statement_import import (
     accept_suggestion,
     budget_vs_actual_report,
@@ -68,6 +68,9 @@ class StatementsScreen(QWidget):
     PDFs are only structurally parsed for the HSBC Premier and Amex layouts
     (see app/pdf_statement_parsers.py) — anything else still goes through
     chat: read_pdf_statement -> transcribe -> the import_statement MCP tool.
+    A PDF with no transactions at all (e.g. Trading 212's "Confirmation of
+    holdings") is tried against parse_holdings_statement instead, and — if
+    recognised — offered as a holdings-snapshot card (Apply, not Import).
     """
 
     def __init__(self, session: Session, on_change=None, parent=None):
@@ -76,6 +79,7 @@ class StatementsScreen(QWidget):
         self.on_change = on_change
         self._selected_statement: Statement | None = None
         self._pending_entries: list[dict] = []
+        self._pending_holdings_entries: list[dict] = []
         self.setAcceptDrops(True)
 
         outer_layout = QVBoxLayout(self)
@@ -192,9 +196,9 @@ class StatementsScreen(QWidget):
         outer.addLayout(browse_row)
 
         note = QLabel(
-            "PDFs are structurally parsed for HSBC Premier and Amex layouts only — anything else falls "
-            "back to reading it via chat (read_pdf_statement) and importing with the import_statement "
-            "tool instead."
+            "PDFs are structurally parsed for HSBC Premier and Amex layouts, plus Trading 212's "
+            "Confirmation of holdings — anything else falls back to reading it via chat "
+            "(read_pdf_statement) and importing with the import_statement tool instead."
         )
         note.setWordWrap(True)
         note.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -211,6 +215,10 @@ class StatementsScreen(QWidget):
 
     def _process_file(self, path: str):
         suffix = Path(path).suffix.lower()
+        if suffix not in (".csv", ".pdf"):
+            QMessageBox.warning(self, "Unsupported file", f"Unsupported file type: {Path(path).name}")
+            return
+
         try:
             if suffix == ".csv":
                 parsed = {
@@ -221,30 +229,37 @@ class StatementsScreen(QWidget):
                     "account_hint": None,
                     "reconciliation": None,
                 }
-            elif suffix == ".pdf":
-                parsed = parse_pdf_statement(path)
             else:
-                QMessageBox.warning(self, "Unsupported file", f"Unsupported file type: {Path(path).name}")
-                return
+                parsed = parse_pdf_statement(path)
         except Exception as exc:
             QMessageBox.warning(self, "Couldn't read file", f"{Path(path).name}: {exc}")
             return
 
-        if not parsed["transactions"]:
-            if suffix == ".pdf" and parsed.get("kind") is None:
-                QMessageBox.information(
-                    self,
-                    "Unrecognised PDF",
-                    f"Couldn't recognise the PDF format of {Path(path).name} — read it via chat "
-                    "(read_pdf_statement) and import with the import_statement tool instead.",
-                )
-            else:
-                QMessageBox.warning(
-                    self, "No transactions found", f"{Path(path).name} didn't contain any transactions."
-                )
+        if parsed["transactions"]:
+            self._add_pending_card(Path(path).name, parsed)
             return
 
-        self._add_pending_card(Path(path).name, parsed)
+        if suffix == ".pdf" and parsed.get("kind") is None:
+            # Not a transaction statement at all — see if it's a broker
+            # holdings-confirmation snapshot instead (e.g. Trading 212).
+            try:
+                holdings_parsed = parse_holdings_statement(path)
+            except Exception as exc:
+                QMessageBox.warning(self, "Couldn't read file", f"{Path(path).name}: {exc}")
+                return
+            if holdings_parsed["kind"] is not None:
+                self._add_holdings_pending_card(Path(path).name, holdings_parsed)
+                return
+            QMessageBox.information(
+                self,
+                "Unrecognised PDF",
+                f"Couldn't recognise the PDF format of {Path(path).name} — read it via chat "
+                "(read_pdf_statement) and import with the import_statement tool instead.",
+            )
+        else:
+            QMessageBox.warning(
+                self, "No transactions found", f"{Path(path).name} didn't contain any transactions."
+            )
 
     # -- pending imports -------------------------------------------------
 
@@ -453,6 +468,160 @@ class StatementsScreen(QWidget):
 
         discard_btn.clicked.connect(discard)
         import_btn.clicked.connect(do_import)
+
+    def _add_holdings_pending_card(self, filename: str, parsed: dict):
+        """A broker holdings-confirmation snapshot (e.g. Trading 212) — not a
+        transaction statement, so it gets its own card: Apply replaces the
+        chosen account's holdings and syncs current_balance/balance_as_of to
+        the document's own stated total, instead of running import_statement."""
+        self.pending_placeholder.setVisible(False)
+        self.pending_section.set_expanded(True)
+        accounts = self.session.query(Account).order_by(Account.name).all()
+        hint = parsed.get("account_hint")
+        default_account_id = detect_account_for_hint(accounts, hint)
+
+        card = QFrame()
+        card.setStyleSheet(
+            f"background-color: {theme.SURFACE}; border: 1px solid {theme.BORDER}; border-radius: 8px;"
+        )
+        outer = QVBoxLayout(card)
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel(f"<b>{filename}</b>"))
+        kind_label = QLabel("Holdings Snapshot")
+        kind_label.setStyleSheet(
+            f"background-color: {theme.ACCENT}; color: {theme.ACCENT_TEXT}; "
+            "padding: 1px 8px; border-radius: 4px;"
+        )
+        top_row.addWidget(kind_label)
+        if hint:
+            if default_account_id is not None:
+                account_name = next(a.name for a in accounts if a.id == default_account_id)
+                detected_label = QLabel(f"Detected account: {account_name}")
+                detected_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            else:
+                detected_label = QLabel(f"Detected: {hint} — choose the account below")
+                detected_label.setStyleSheet(f"color: {theme.WARNING};")
+            top_row.addWidget(detected_label)
+        top_row.addStretch()
+        outer.addLayout(top_row)
+
+        mid_row = QHBoxLayout()
+        mid_row.addWidget(QLabel("Account:"))
+        account_combo = QComboBox()
+        for a in accounts:
+            account_combo.addItem(a.name, a.id)
+        if default_account_id is not None:
+            idx = account_combo.findData(default_account_id)
+            if idx >= 0:
+                account_combo.setCurrentIndex(idx)
+        mid_row.addWidget(account_combo)
+        as_of = parsed.get("as_of")
+        mid_row.addWidget(QLabel(f"As of: {as_of or 'unknown'}"))
+        holdings_value = parsed.get("holdings_value")
+        mid_row.addWidget(
+            QLabel(f"Value: £{holdings_value:,.2f}" if holdings_value is not None else "Value: —")
+        )
+        mid_row.addStretch()
+        outer.addLayout(mid_row)
+
+        for h in parsed["holdings"]:
+            unmapped = (
+                " ⚠ unmapped ticker — set it on the Accounts screen after applying" if not h["ticker"] else ""
+            )
+            line = QLabel(
+                f"{h['instrument']} ({h['isin']}) — {h['quantity']:g} @ £{h['price']:,.2f} = "
+                f"£{h['value']:,.2f}{unmapped}"
+            )
+            line.setWordWrap(True)
+            if unmapped:
+                line.setStyleSheet(f"color: {theme.WARNING};")
+            outer.addWidget(line)
+
+        recon = parsed.get("reconciliation")
+        if recon is not None:
+            if recon["ok"]:
+                recon_label = QLabel(
+                    f"✓ Reconciles with the document's own stated total (£{recon['expected_value']:,.2f})"
+                )
+                recon_label.setStyleSheet(f"color: {theme.SUCCESS}; font-size: 11px;")
+            else:
+                recon_label = QLabel(
+                    f"⚠ Doesn't reconcile — document states £{recon['expected_value']:,.2f}, parsed "
+                    f"holdings sum to £{recon['computed_value']:,.2f}. Review before applying."
+                )
+                recon_label.setStyleSheet(f"color: {theme.WARNING}; font-size: 11px;")
+            recon_label.setWordWrap(True)
+            outer.addWidget(recon_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        discard_btn = QPushButton("Discard")
+        apply_btn = QPushButton("Apply")
+        apply_btn.setObjectName("primaryButton")
+        btn_row.addWidget(discard_btn)
+        btn_row.addWidget(apply_btn)
+        outer.addLayout(btn_row)
+
+        self.pending_layout.insertWidget(self.pending_layout.count() - 1, card)
+        self._refresh_pending_title()
+
+        entry = {"filename": filename, "card": card}
+
+        def discard():
+            if entry in self._pending_holdings_entries:
+                self._pending_holdings_entries.remove(entry)
+            self.pending_layout.removeWidget(card)
+            card.hide()
+            card.deleteLater()
+            if self.pending_layout.count() == 1:  # nothing left but the trailing stretch
+                self.pending_placeholder.setVisible(True)
+            self._refresh_pending_title()
+
+        entry["discard"] = discard
+        self._pending_holdings_entries.append(entry)
+        self._refresh_pending_title()
+
+        def do_apply():
+            account_id = account_combo.currentData()
+            if account_id is None:
+                QMessageBox.warning(self, "No account", "Choose an account first.")
+                return
+            account = self.session.get(Account, account_id)
+            if account is None:
+                QMessageBox.warning(self, "No account", "Choose an account first.")
+                return
+            # The document doesn't state cost basis, so preserve whatever average_price a
+            # matching ticker already had (e.g. entered by hand) instead of wiping it on re-import.
+            existing_avg_prices = {h.ticker: h.average_price for h in account.holdings}
+            account.holdings.clear()  # cascade="all, delete-orphan" also updates the in-memory collection
+            for h in parsed["holdings"]:
+                ticker = (h["ticker"] or h["isin"]).upper()
+                self.session.add(
+                    Holding(
+                        account=account,
+                        ticker=ticker,
+                        quantity=h["quantity"],
+                        average_price=existing_avg_prices.get(ticker),
+                    )
+                )
+            # Trust this snapshot's own reconciled total (quantity x its stated price) rather
+            # than fetching a fresh live price immediately after — it's the more accurate figure
+            # for "value as of this document", and the document doesn't report cash, so
+            # cash_position is left as whatever was already set.
+            if holdings_value is not None:
+                account.current_balance = account.cash_position + holdings_value
+            if as_of:
+                account.balance_as_of = dt.date.fromisoformat(as_of)
+            self.session.commit()
+            discard()
+            self._notify_change()
+            QMessageBox.information(
+                self, "Applied", f"Updated {account.name}'s holdings and balance from {filename}."
+            )
+
+        discard_btn.clicked.connect(discard)
+        apply_btn.clicked.connect(do_apply)
 
     # -- statements table -------------------------------------------------
 

@@ -5,8 +5,8 @@ from pathlib import Path
 
 from nicegui import events, run, ui
 
-from app.models import Account, BudgetSuggestion, Category, Statement, SuggestionStatus, Transaction
-from app.pdf_statement_parsers import parse_pdf_statement
+from app.models import Account, BudgetSuggestion, Category, Holding, Statement, SuggestionStatus, Transaction
+from app.pdf_statement_parsers import parse_holdings_statement, parse_pdf_statement
 from app.seed import get_or_create_category
 from app.statement_import import (
     accept_suggestion,
@@ -32,9 +32,11 @@ def statements_page():
 
     with page_shell("/statements", "Statements"):
         ui.label(
-            "CSV and PDF statements are both supported here. PDFs are only structurally parsed for "
-            "HSBC Premier and Amex layouts — anything else falls back to reading it via chat "
-            "(read_pdf_statement) and importing with the import_statement tool instead."
+            "CSV and PDF statements are both supported here. PDFs are structurally parsed for "
+            "HSBC Premier and Amex layouts, plus Trading 212's Confirmation of holdings (a "
+            "point-in-time portfolio snapshot, applied rather than imported) — anything else falls "
+            "back to reading it via chat (read_pdf_statement) and importing with the import_statement "
+            "tool instead."
         ).style(f"color: {TEXT_MUTED}; font-size: 12px;")
 
         with (
@@ -51,6 +53,7 @@ def statements_page():
             )
 
         pending_entries: list[dict] = []
+        pending_holdings_entries: list[dict] = []
 
         with ui.row().classes("items-center justify-between w-full mt-2"):
             ui.label("Pending Imports").classes("text-xl font-bold")
@@ -131,6 +134,11 @@ def statements_page():
             tmp_path = Path(tempfile.gettempdir()) / f"upload_{uuid.uuid4().hex}_{e.file.name}"
             await e.file.save(tmp_path)
             suffix = Path(e.file.name).suffix.lower()
+            if suffix not in (".csv", ".pdf"):
+                ui.notify(f"Unsupported file type: {e.file.name}", type="negative")
+                tmp_path.unlink(missing_ok=True)
+                return
+
             try:
                 if suffix == ".csv":
                     transactions = await run.io_bound(extract_csv_transactions, str(tmp_path))
@@ -142,22 +150,23 @@ def statements_page():
                         "account_hint": None,
                         "reconciliation": None,
                     }
-                elif suffix == ".pdf":
+                else:
                     parsed = await run.io_bound(parse_pdf_statement, str(tmp_path)) or {
                         "kind": None,
                         "transactions": [],
                     }
-                else:
-                    ui.notify(f"Unsupported file type: {e.file.name}", type="negative")
-                    return
-            except Exception as exc:
-                ui.notify(f"Couldn't read {e.file.name}: {exc}", type="negative")
-                return
-            finally:
-                tmp_path.unlink(missing_ok=True)
 
-            if not parsed["transactions"]:
+                if parsed["transactions"]:
+                    add_pending_card(e.file.name, parsed)
+                    return
+
                 if suffix == ".pdf" and parsed.get("kind") is None:
+                    # Not a transaction statement at all — see if it's a broker
+                    # holdings-confirmation snapshot instead (e.g. Trading 212).
+                    holdings_parsed = await run.io_bound(parse_holdings_statement, str(tmp_path))
+                    if holdings_parsed["kind"] is not None:
+                        add_holdings_pending_card(e.file.name, holdings_parsed)
+                        return
                     ui.notify(
                         f"Couldn't recognise the PDF format of {e.file.name} — read it via chat "
                         "(read_pdf_statement) and import with the import_statement tool instead.",
@@ -165,9 +174,10 @@ def statements_page():
                     )
                 else:
                     ui.notify(f"{e.file.name} didn't contain any transactions.", type="negative")
-                return
-
-            add_pending_card(e.file.name, parsed)
+            except Exception as exc:
+                ui.notify(f"Couldn't read {e.file.name}: {exc}", type="negative")
+            finally:
+                tmp_path.unlink(missing_ok=True)
 
         upload_widget.on_upload(handle_upload)
 
@@ -261,6 +271,118 @@ def statements_page():
                 refresh_suggestions()
                 refresh_gaps()
                 ui.notify(msg, type="positive")
+
+        def add_holdings_pending_card(filename: str, parsed: dict):
+            """A broker holdings-confirmation snapshot (e.g. Trading 212) — not
+            a transaction statement, so it gets its own card: Apply replaces
+            the chosen account's holdings and syncs current_balance/
+            balance_as_of to the document's own stated total, instead of
+            running import_statement."""
+            pending_placeholder.set_visibility(False)
+            accounts = session.query(Account).order_by(Account.name).all()
+            account_options = {a.id: a.name for a in accounts}
+            hint = parsed.get("account_hint")
+            default_account = detect_account_for_hint(accounts, hint)
+            as_of = parsed.get("as_of")
+            holdings_value = parsed.get("holdings_value")
+
+            with pending_container:
+                card = ui.card().classes("w-full")
+            with card:
+                with ui.row().classes("items-center gap-3 flex-wrap w-full"):
+                    ui.icon("pie_chart")
+                    ui.label(filename).classes("font-bold")
+                    ui.badge("Holdings Snapshot").props("color=primary")
+                    if hint:
+                        if default_account is not None:
+                            ui.label(f"Detected account: {account_options[default_account]}").style(
+                                f"color: {TEXT_MUTED};"
+                            )
+                        else:
+                            ui.label(f"Detected: {hint} — choose the account below").style(
+                                f"color: {WARNING};"
+                            )
+
+                with ui.row().classes("items-center gap-3 flex-wrap w-full mt-1"):
+                    account_select = ui.select(
+                        account_options, label="Account", value=default_account
+                    ).classes("min-w-[180px]")
+                    ui.label(f"As of: {as_of or 'unknown'}").style(f"color: {TEXT_MUTED};")
+                    ui.label(f"Value: {_money(holdings_value) or '—'}").style(f"color: {TEXT_MUTED};")
+
+                for h in parsed["holdings"]:
+                    unmapped = not h["ticker"]
+                    text = (
+                        f"{h['instrument']} ({h['isin']}) — {h['quantity']:g} @ {_money(h['price'])} = "
+                        f"{_money(h['value'])}"
+                    )
+                    if unmapped:
+                        text += " ⚠ unmapped ticker — set it on the Accounts page after applying"
+                    ui.label(text).style(f"color: {WARNING if unmapped else TEXT_MUTED}; font-size: 12px;")
+
+                recon = parsed.get("reconciliation")
+                if recon is not None:
+                    if recon["ok"]:
+                        ui.label(
+                            "✓ Reconciles with the document's own stated total "
+                            f"({_money(recon['expected_value'])})"
+                        ).style(f"color: {SUCCESS}; font-size: 12px;")
+                    else:
+                        ui.label(
+                            f"⚠ Doesn't reconcile — document states {_money(recon['expected_value'])}, "
+                            f"parsed holdings sum to {_money(recon['computed_value'])}. Review before "
+                            "applying."
+                        ).style(f"color: {WARNING}; font-size: 12px;")
+
+                with ui.row().classes("justify-end w-full gap-2 mt-1"):
+                    ui.button("Discard", on_click=lambda: discard()).props("flat")
+                    ui.button("Apply", on_click=lambda: do_apply()).props("color=primary")
+
+            entry = {"filename": filename, "card": card}
+
+            def discard():
+                pending_container.remove(card)
+                if entry in pending_holdings_entries:
+                    pending_holdings_entries.remove(entry)
+
+            entry["discard"] = discard
+            pending_holdings_entries.append(entry)
+
+            def do_apply():
+                account_id = account_select.value
+                if account_id is None:
+                    ui.notify("Choose an account first.", type="warning")
+                    return
+                account = session.get(Account, account_id)
+                if account is None:
+                    ui.notify("Choose an account first.", type="warning")
+                    return
+                # The document doesn't state cost basis, so preserve whatever average_price a
+                # matching ticker already had (e.g. entered by hand) instead of wiping it on re-import.
+                existing_avg_prices = {h.ticker: h.average_price for h in account.holdings}
+                account.holdings.clear()  # cascade="all, delete-orphan" also updates the in-memory collection
+                for h in parsed["holdings"]:
+                    ticker = (h["ticker"] or h["isin"]).upper()
+                    session.add(
+                        Holding(
+                            account=account,
+                            ticker=ticker,
+                            quantity=h["quantity"],
+                            average_price=existing_avg_prices.get(ticker),
+                        )
+                    )
+                # Trust this snapshot's own reconciled total (quantity x its stated price) rather
+                # than fetching a fresh live price immediately after — it's the more accurate figure
+                # for "value as of this document", and the document doesn't report cash, so
+                # cash_position is left as whatever was already set.
+                if holdings_value is not None:
+                    account.current_balance = account.cash_position + holdings_value
+                if as_of:
+                    account.balance_as_of = dt.date.fromisoformat(as_of)
+                session.commit()
+                discard()
+                refresh_statements()
+                ui.notify(f"Updated {account.name}'s holdings and balance from {filename}.", type="positive")
 
         ui.label("Imported Statements").classes("text-xl font-bold mt-2")
         statements_table = ui.table(

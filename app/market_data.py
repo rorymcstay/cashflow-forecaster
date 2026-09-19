@@ -20,6 +20,32 @@ def clear_cache() -> None:
     _CACHE.clear()
 
 
+def fetch_latest_prices(tickers: list[str]) -> dict[str, float]:
+    """Most recent available close price per ticker. A ticker yfinance can't
+    resolve (or that has no recent data) is simply omitted from the result
+    rather than raising, matching this module's fail-soft convention —
+    callers should treat a missing ticker's price as unknown, not zero."""
+    if not tickers:
+        return {}
+    try:
+        data = yf.download(tickers, period="5d", interval="1d", progress=False, auto_adjust=True)
+        if data.empty:
+            return {}
+        close = data["Close"]
+        if isinstance(close, pd.Series):
+            close = close.to_frame(tickers[0])
+        result = {}
+        for ticker in tickers:
+            if ticker not in close.columns:
+                continue
+            series = close[ticker].dropna()
+            if not series.empty:
+                result[ticker] = float(series.iloc[-1])
+        return result
+    except Exception:
+        return {}
+
+
 def fetch_portfolio_monthly_return_series(
     weights: dict[str, float], as_of: dt.date, lookback_years: int = 10, force_refresh: bool = False
 ) -> list[tuple[dt.date, float]]:

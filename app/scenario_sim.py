@@ -34,7 +34,7 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 from sqlalchemy.orm import Session
 
-from app import investment_sim, market_data
+from app import investment_sim, investments, market_data
 from app.forecast import HypotheticalItem, OneOffEvent, combined_daily_forecast
 from app.models import Account
 
@@ -74,15 +74,20 @@ def _regime_delta(
     delta = np.zeros((n_paths, len(dates)))
     used: list[str] = []
     for account in accounts:
-        weights = account.portfolio_weights
+        weights = investments.portfolio_weights(account)
         if not weights:
             continue
         returns = market_data.fetch_portfolio_monthly_returns(weights, dt.date.today(), lookback_years)
         if not returns:
             continue
+        # Only the shares' own market value carries market risk — cash_position
+        # stays flat in both the stochastic paths and the deterministic
+        # baseline they're compared against (see app/forecast.py's growth split).
+        shares_principal = account.current_balance - account.cash_position
         paths = investment_sim.bootstrap_paths(
-            returns, account.current_balance, len(dates) - 1, n_paths=n_paths, seed=seed
+            returns, shares_principal, len(dates) - 1, n_paths=n_paths, seed=seed
         )
+        paths = paths + account.cash_position
         deterministic = np.array(_extract_at_dates(baseline_df, account.name, dates))
         delta += paths - deterministic[np.newaxis, :]
         used.append(account.name)

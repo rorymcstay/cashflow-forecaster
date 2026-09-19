@@ -33,6 +33,7 @@ def init_db() -> None:
     Base.metadata.create_all(engine)
     _add_missing_columns()
     _drop_removed_columns()
+    _migrate_holdings_to_quantity()
     _migrate_budgets()
 
 
@@ -51,6 +52,7 @@ _ADDED_COLUMNS = {
         ("cc_payment_day", "INTEGER"),
         ("cc_pay_in_full", "BOOLEAN NOT NULL DEFAULT 0"),
         ("cc_fixed_payment_amount", "FLOAT"),
+        ("cash_position", "FLOAT NOT NULL DEFAULT 0"),
     ],
     "budget_items": [
         ("target_account_id", "INTEGER REFERENCES accounts(id)"),
@@ -60,6 +62,9 @@ _ADDED_COLUMNS = {
         # default budget immediately after, so it's never actually null in
         # practice. The model's BudgetItem.budget_id stays non-Optional.
         ("budget_id", "INTEGER REFERENCES budgets(id)"),
+    ],
+    "holdings": [
+        ("average_price", "FLOAT"),
     ],
 }
 
@@ -89,6 +94,51 @@ def _drop_removed_columns() -> None:
             for name in columns:
                 if name in existing:
                     conn.exec_driver_sql(f"ALTER TABLE {table} DROP COLUMN {name}")
+        conn.commit()
+
+
+def _migrate_holdings_to_quantity() -> None:
+    """One-time migration: holdings.weight (relative portfolio weight,
+    manually set) -> holdings.quantity (actual share count) — see
+    app/investments.py. Runs only while the old `weight` column still
+    exists (a no-op forever after, on every later startup).
+
+    Back-computes each holding's share count from its account's
+    pre-migration current_balance (the combined cash+shares total under the
+    old model) times its weight, divided by that ticker's live price — i.e.
+    assumes weight summed to 1 (no leftover cash) unless a ticker's price
+    can't be fetched. If ANY ticker's price is unavailable (no network),
+    the whole migration is skipped and retried on the next startup rather
+    than guessing — better to wait than to write a wrong share count into
+    real financial data.
+    """
+    with engine.connect() as conn:
+        existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(holdings)")}
+        if "weight" not in existing:
+            return
+        rows = conn.exec_driver_sql(
+            "SELECT h.id, h.ticker, h.weight, a.current_balance "
+            "FROM holdings h JOIN accounts a ON a.id = h.account_id"
+        ).fetchall()
+        tickers = sorted({row[1] for row in rows})
+        prices = {}
+        if tickers:
+            from app import market_data
+
+            prices = market_data.fetch_latest_prices(tickers)
+            if not prices:
+                return  # no network / prices unavailable — retry next startup
+
+        if "quantity" not in existing:
+            conn.exec_driver_sql("ALTER TABLE holdings ADD COLUMN quantity FLOAT")
+        for holding_id, ticker, weight, current_balance in rows:
+            price = prices.get(ticker)
+            # A ticker that couldn't be priced keeps its old weight number as
+            # a placeholder quantity — clearly not a real share count, but
+            # preserves the holding for manual correction instead of losing it.
+            quantity = (current_balance * weight) / price if price else weight
+            conn.exec_driver_sql("UPDATE holdings SET quantity = ? WHERE id = ?", (quantity, holding_id))
+        conn.exec_driver_sql("ALTER TABLE holdings DROP COLUMN weight")
         conn.commit()
 
 
