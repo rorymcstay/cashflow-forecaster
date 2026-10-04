@@ -41,6 +41,7 @@ NAV_ITEMS = [
 PINNED_NAV_ITEMS = [
     ("/accounts", "Accounts"),
     ("/budgets", "Budgets"),
+    ("/sync", "Sync Devices"),
 ]
 
 # Registered once at import time with shared=True, so NiceGUI injects it into

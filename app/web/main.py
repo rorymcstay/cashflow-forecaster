@@ -8,7 +8,7 @@ import os
 from nicegui import ui
 
 from app.db import init_db
-from app.web import _engineio_patch  # noqa: F401
+from app.web import _engineio_patch, sync_api  # noqa: F401
 from app.web.pages import (  # noqa: F401
     accounts,
     budget_builder,
@@ -21,6 +21,7 @@ from app.web.pages import (  # noqa: F401
     investment_sim,
     scenarios,
     statements,
+    sync,
     transactions,
     upcoming_expenses,
     vendor_groups,
@@ -31,7 +32,9 @@ init_db()
 ui.run(
     title="Budgeting",
     host="0.0.0.0",
-    port=8084,
+    # Overridable so several instances (e.g. to try out device sync) can run
+    # side by side on one machine.
+    port=int(os.environ.get("PORT", "8084")),
     reload=os.environ.get("RELOAD") == "1",
     # Default (3s) is too tight for a Swarm-deployed server — a brief network
     # blip or reconnect attempt easily exceeds it, and NiceGUI responds by

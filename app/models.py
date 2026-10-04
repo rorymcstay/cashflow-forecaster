@@ -1,12 +1,34 @@
 import datetime as dt
 import enum
+import uuid
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
-    pass
+    # Globally unique row identity for multi-device sync (see app/sync.py).
+    # Integer primary keys are only meaningful on the device that allocated
+    # them — two devices will happily both create an account with id 5 — so
+    # the sync write log refers to rows, and to foreign keys, by this instead.
+    # Declared here so every mapped table gets its own copy of the column.
+    sync_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), unique=True, index=True
+    )
 
 
 class FlowType(enum.Enum):
@@ -359,3 +381,49 @@ class BudgetSuggestion(Base):
     account: Mapped["Account"] = relationship()
     category: Mapped["Category"] = relationship()
     budget_item: Mapped["BudgetItem | None"] = relationship()
+
+
+# --- Multi-device sync bookkeeping (see app/sync.py) -------------------------
+# Plain Core tables rather than mapped classes: they're written only from
+# inside flush events and the sync merge, never through the ORM, and must
+# never themselves be captured by the write log.
+
+# Append-only write log: one entry per row insert/update/delete, from this
+# device or merged in from another. `origin` + `seq` identify an entry
+# globally (seq counts up per origin device); `ts` is a hybrid logical clock
+# in epoch-ms used for last-write-wins. `data` is a JSON object of the
+# columns written, with foreign keys expressed as the referenced row's
+# sync_id.
+sync_log = Table(
+    "sync_log",
+    Base.metadata,
+    Column("id", Integer, primary_key=True),
+    Column("origin", String(36), nullable=False),
+    Column("seq", Integer, nullable=False),
+    Column("ts", Integer, nullable=False, index=True),
+    Column("tbl", String(64), nullable=False),
+    Column("row_uid", String(36), nullable=False),
+    Column("op", String(6), nullable=False),
+    Column("data", Text, nullable=True),
+    UniqueConstraint("origin", "seq"),
+    Index("ix_sync_log_row", "tbl", "row_uid"),
+)
+
+# Single row: this device's identity in the sync log.
+sync_state = Table(
+    "sync_state",
+    Base.metadata,
+    Column("id", Integer, primary_key=True),
+    Column("device_id", String(36), nullable=False),
+)
+
+# When two devices independently create "the same" row (e.g. both have a
+# "Groceries" category, or the GlobalOptions singleton), the incoming row is
+# folded into the local one rather than duplicated: remote_uid -> local_uid.
+sync_alias = Table(
+    "sync_alias",
+    Base.metadata,
+    Column("remote_uid", String(36), primary_key=True),
+    Column("tbl", String(64), nullable=False),
+    Column("local_uid", String(36), nullable=False, index=True),
+)

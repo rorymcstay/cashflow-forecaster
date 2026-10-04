@@ -17,6 +17,7 @@ MODULES = [
     "app.seed",
     "app.statement_import",
     "app.statements",
+    "app.sync",
     "app.transactions",
     "app.ui.accounts_screen",
     "app.ui.budget_items_screen",
@@ -44,7 +45,9 @@ MODULES = [
     "app.web.pages.scenarios",
     "app.web.pages.statements",
     "app.web.pages.transactions",
+    "app.web.pages.sync",
     "app.web.pages.upcoming_expenses",
+    "app.web.sync_api",
 ]
 
 

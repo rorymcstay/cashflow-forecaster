@@ -4,6 +4,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
+from app import sync
 from app.models import Base
 
 DB_PATH = (
@@ -34,6 +35,9 @@ def init_db() -> None:
     _add_missing_columns()
     _drop_removed_columns()
     _migrate_holdings_to_quantity()
+    # Before any ORM writes below — those need every row to already have a
+    # sync_id for the write log to reference.
+    sync.backfill(engine)
     _migrate_budgets()
 
 
