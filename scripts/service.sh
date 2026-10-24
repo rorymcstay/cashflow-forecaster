@@ -1,6 +1,7 @@
 docker service create \
   --name budgeting \
   --publish published=8085,target=8084 \
+  --constraint node.labels.budgeting-db==true \
   --mount type=volume,source=budgeting-db,target=/data \
   --mount type=volume,source=uv-cache,target=/root/.cache/uv --env BUDGETING_DB_PATH=/data/budgeting.db \
   --restart-condition "any" \

@@ -1,5 +1,6 @@
 import calendar
 import datetime as dt
+import os
 
 from mcp.server.mcpserver import MCPServer
 
@@ -1880,7 +1881,18 @@ def get_expense_insights(
 
 
 def main():
-    server.run()
+    # stdio by default (what .mcp.json launches locally); set
+    # MCP_TRANSPORT=streamable-http to serve it over the network instead, as
+    # scripts/mcp_service.sh does.
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    if transport == "stdio":
+        server.run()
+    else:
+        server.run(
+            transport="streamable-http",
+            host=os.environ.get("MCP_HOST", "0.0.0.0"),
+            port=int(os.environ.get("MCP_PORT", "8000")),
+        )
 
 
 if __name__ == "__main__":
