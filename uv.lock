@@ -187,6 +187,7 @@ name = "budgeting"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
     { name = "nicegui" },
     { name = "numpy" },
@@ -212,6 +213,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.0.0" },
     { name = "nicegui", specifier = ">=3.16.0" },
     { name = "numpy", specifier = ">=2.5.1" },
